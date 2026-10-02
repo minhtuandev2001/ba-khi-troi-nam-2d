@@ -1,0 +1,175 @@
+import { settings } from '../settings';
+
+interface Stick {
+  zone: HTMLElement;
+  base: HTMLElement;
+  knob: HTMLElement;
+  pointerId: number | null;
+  ox: number;
+  oy: number;
+  x: number;
+  y: number;
+}
+
+export type TouchButton = 'reload' | 'interact' | 'heal' | 'grenade' | 'smoke' | 'scope' | 'map' | 'inventory' | 'pause';
+
+/** On-screen joysticks: left moves, right aims and fires (release throws grenades). */
+export class TouchControls {
+  move = { x: 0, y: 0 };
+  aim = { x: 0, y: 0, active: false };
+  private releasePulse = false;
+  private lastAimMagnitude = 0;
+  private readonly left: Stick;
+  private readonly right: Stick;
+  private readonly radius: number;
+  private readonly buttons = new Map<TouchButton, HTMLElement>();
+
+  constructor(private readonly root: HTMLElement, onButton: (b: TouchButton) => void) {
+    this.radius = 56 * settings.touchSize;
+    root.innerHTML = '';
+    root.classList.remove('hidden');
+    document.body.classList.add('touch-ui');
+    this.left = this.createStick('left');
+    this.right = this.createStick('right');
+
+    const s = settings.touchSize;
+    const size = Math.round(50 * s);
+    const big = Math.round(size * 1.25);
+    const gap = 10;
+    const col1 = 12;
+    const col2 = col1 + size + gap;
+    const row = (i: number) => `calc(max(10px, env(safe-area-inset-bottom)) + ${i * (size + gap)}px)`;
+    const defs: [TouchButton, string, string, number][] = [
+      ['heal', '➕', `right:${col1}px;bottom:${row(0)}`, size],
+      ['reload', '<small>R</small>', `right:${col1}px;bottom:${row(1)}`, size],
+      ['interact', '<small>NHẶT</small>', `right:${col1 - (big - size) / 2}px;bottom:${row(2)}`, big],
+      ['smoke', '💨', `right:${col2}px;bottom:${row(0)}`, size],
+      ['grenade', '💣', `right:${col2}px;bottom:${row(1)}`, size],
+      ['pause', '⏸', `left:10px;top:${56}px`, size],
+      ['scope', '🔭', `left:10px;top:${56 + (size + gap)}px`, size],
+      ['map', '🗺️', `left:10px;top:${56 + 2 * (size + gap)}px`, size],
+      ['inventory', '🎒', `left:10px;top:${56 + 3 * (size + gap)}px`, size],
+    ];
+    for (const [id, label, style, px] of defs) {
+      const btn = document.createElement('div');
+      btn.className = 'tbtn';
+      btn.innerHTML = label;
+      btn.setAttribute('style', `${style};width:${px}px;height:${px}px`);
+      btn.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onButton(id);
+      });
+      root.appendChild(btn);
+      this.buttons.set(id, btn);
+    }
+  }
+
+  private createStick(side: 'left' | 'right'): Stick {
+    const zone = document.createElement('div');
+    zone.className = `joy-zone ${side}`;
+    const base = document.createElement('div');
+    base.className = 'joy-base hidden';
+    const knob = document.createElement('div');
+    knob.className = 'joy-knob hidden';
+    const d = this.radius * 2;
+    base.style.width = base.style.height = `${d}px`;
+    knob.style.width = knob.style.height = `${d * 0.45}px`;
+    zone.append(base, knob);
+    this.root.appendChild(zone);
+    const stick: Stick = { zone, base, knob, pointerId: null, ox: 0, oy: 0, x: 0, y: 0 };
+
+    zone.addEventListener('pointerdown', (e) => {
+      if (stick.pointerId !== null) return;
+      e.preventDefault();
+      zone.setPointerCapture(e.pointerId);
+      const rect = zone.getBoundingClientRect();
+      stick.pointerId = e.pointerId;
+      stick.ox = e.clientX - rect.left;
+      stick.oy = e.clientY - rect.top;
+      this.place(stick, stick.ox, stick.oy, 0, 0);
+      base.classList.remove('hidden');
+      knob.classList.remove('hidden');
+      if (side === 'right') this.aim.active = true;
+    });
+    zone.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== stick.pointerId) return;
+      const rect = zone.getBoundingClientRect();
+      let dx = e.clientX - rect.left - stick.ox;
+      let dy = e.clientY - rect.top - stick.oy;
+      const len = Math.hypot(dx, dy);
+      if (len > this.radius) {
+        dx = (dx / len) * this.radius;
+        dy = (dy / len) * this.radius;
+      }
+      stick.x = dx / this.radius;
+      stick.y = dy / this.radius;
+      this.place(stick, stick.ox, stick.oy, dx, dy);
+      this.sync(side, stick);
+    });
+    const end = (e: PointerEvent) => {
+      if (e.pointerId !== stick.pointerId) return;
+      stick.pointerId = null;
+      if (side === 'right' && this.lastAimMagnitude > 0.2) this.releasePulse = true;
+      stick.x = 0;
+      stick.y = 0;
+      base.classList.add('hidden');
+      knob.classList.add('hidden');
+      this.sync(side, stick);
+      if (side === 'right') this.aim.active = false;
+    };
+    zone.addEventListener('pointerup', end);
+    zone.addEventListener('pointercancel', end);
+    return stick;
+  }
+
+  private place(s: Stick, ox: number, oy: number, dx: number, dy: number) {
+    s.base.style.left = `${ox}px`;
+    s.base.style.top = `${oy}px`;
+    s.knob.style.left = `${ox + dx}px`;
+    s.knob.style.top = `${oy + dy}px`;
+  }
+
+  private sync(side: 'left' | 'right', s: Stick) {
+    if (side === 'left') {
+      this.move.x = s.x;
+      this.move.y = s.y;
+    } else {
+      this.aim.x = s.x;
+      this.aim.y = s.y;
+      const m = Math.hypot(s.x, s.y);
+      if (s.pointerId !== null) this.lastAimMagnitude = m;
+    }
+  }
+
+  get aimMagnitude(): number {
+    return Math.hypot(this.aim.x, this.aim.y);
+  }
+
+  get lastThrowMagnitude(): number {
+    return this.lastAimMagnitude;
+  }
+
+  get fireHeld(): boolean {
+    return this.aim.active && this.aimMagnitude > 0.35;
+  }
+
+  consumeRelease(): boolean {
+    const v = this.releasePulse;
+    this.releasePulse = false;
+    return v;
+  }
+
+  setInteractLabel(label: string | null) {
+    const btn = this.buttons.get('interact');
+    if (!btn) return;
+    btn.classList.toggle('on', !!label);
+    btn.style.opacity = label ? '1' : '0.45';
+  }
+
+  destroy() {
+    document.body.classList.remove('touch-ui');
+    this.root.innerHTML = '';
+    this.root.classList.add('hidden');
+  }
+}
