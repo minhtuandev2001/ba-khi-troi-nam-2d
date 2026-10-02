@@ -17,7 +17,7 @@ export class MapRenderer {
     this.base.width = this.base.height = resolution;
     const ctx = this.base.getContext('2d')!;
     const k = resolution / MAP_SIZE;
-    ctx.fillStyle = '#4f7f3a';
+    ctx.fillStyle = '#7ccf4f';
     ctx.fillRect(0, 0, resolution, resolution);
     for (const d of map.decor) {
       ctx.fillStyle = `#${d.color.toString(16).padStart(6, '0')}`;
@@ -27,13 +27,13 @@ export class MapRenderer {
       ctx.fill();
     }
     ctx.globalAlpha = 1;
-    ctx.fillStyle = '#2f5a24';
+    ctx.fillStyle = '#3fa02e';
     for (const t of map.trees) {
       ctx.beginPath();
       ctx.arc(t.x * k, t.y * k, Math.max(1.5, t.r * 2.2 * k), 0, Math.PI * 2);
       ctx.fill();
     }
-    ctx.fillStyle = '#8a8a8a';
+    ctx.fillStyle = '#c3cfd8';
     for (const r of map.rocks) {
       ctx.beginPath();
       ctx.arc(r.x * k, r.y * k, Math.max(1.5, r.r * k), 0, Math.PI * 2);
@@ -42,11 +42,11 @@ export class MapRenderer {
     for (const h of map.houses) {
       ctx.fillStyle = `#${h.roof.toString(16).padStart(6, '0')}`;
       ctx.fillRect(h.x * k, h.y * k, h.w * k, h.h * k);
-      ctx.strokeStyle = '#1b1b1b';
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#10284d';
+      ctx.lineWidth = 1.5;
       ctx.strokeRect(h.x * k, h.y * k, h.w * k, h.h * k);
     }
-    ctx.fillStyle = '#555';
+    ctx.fillStyle = '#3e4a56';
     for (const w of map.walls) {
       if (w.houseId >= 0) continue;
       ctx.fillRect(w.x * k, w.y * k, Math.max(1, w.w * k), Math.max(1, w.h * k));

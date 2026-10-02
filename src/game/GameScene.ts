@@ -24,9 +24,10 @@ import { settings } from '../settings';
 import { falloff, sfx } from './audio';
 import type { GameSession } from './session';
 
-const ARMOR_COLORS = [0, 0x9fb3c0, 0x3d7fc4, 0x1d1d1d];
-const BAG_COLORS = [0, 0x8b6b3d, 0x5d7a3a, 0x2f3e46];
-const SKIN = 0xf2c79b;
+const ARMOR_COLORS = [0, 0xc9d6e0, 0x3fa3ff, 0x2b2f6b];
+const BAG_COLORS = [0, 0xc98a3d, 0x4fae3a, 0x8a4fd6];
+const SKIN = 0xffcf9e;
+const OUTLINE = 0x10284d;
 
 interface Tracer {
   id: number;
@@ -59,16 +60,19 @@ class PlayerView {
 
   constructor(scene: Phaser.Scene, readonly pid: number, name: string | null, isSelf: boolean) {
     this.bag = scene.add.circle(-16, 0, 13, 0x000000).setVisible(false);
-    this.gun = scene.add.rectangle(30, 0, 40, 7, 0x333333).setOrigin(0, 0.5).setStrokeStyle(1.5, 0x111111);
-    this.handL = scene.add.circle(14, -16, 7, SKIN).setStrokeStyle(2, 0x3a2a1a);
-    this.handR = scene.add.circle(14, 16, 7, SKIN).setStrokeStyle(2, 0x3a2a1a);
-    this.body = scene.add.circle(0, 0, PLAYER_RADIUS, SKIN).setStrokeStyle(isSelf ? 3 : 2, isSelf ? 0xffd34d : 0x3a2a1a);
+    this.gun = scene.add.rectangle(30, 0, 40, 7, 0x333333).setOrigin(0, 0.5).setStrokeStyle(2, OUTLINE);
+    this.handL = scene.add.circle(14, -16, 7, SKIN).setStrokeStyle(2.5, OUTLINE);
+    this.handR = scene.add.circle(14, 16, 7, SKIN).setStrokeStyle(2.5, OUTLINE);
+    this.body = scene.add.circle(0, 0, PLAYER_RADIUS, SKIN).setStrokeStyle(isSelf ? 4 : 3, isSelf ? 0xffc21a : OUTLINE);
     this.armorRing = scene.add.circle(0, 0, PLAYER_RADIUS - 5).setStrokeStyle(5, 0x000000).setVisible(false);
     this.healRing = scene.add.circle(0, 0, PLAYER_RADIUS + 6).setStrokeStyle(3, 0x5cff7a, 0.8).setVisible(false);
     this.container = scene.add.container(0, 0, [this.bag, this.gun, this.handL, this.handR, this.body, this.armorRing, this.healRing]);
     this.container.setDepth(10);
     this.label = name
-      ? scene.add.text(0, 0, name, { fontFamily: 'sans-serif', fontSize: '13px', color: '#ffffff', stroke: '#000000', strokeThickness: 3 }).setOrigin(0.5, 1).setDepth(60)
+      ? scene.add
+          .text(0, 0, name, { fontFamily: "'Baloo 2', sans-serif", fontSize: '15px', fontStyle: 'bold', color: isSelf ? '#ffe066' : '#ffffff', stroke: '#10284d', strokeThickness: 4 })
+          .setOrigin(0.5, 1)
+          .setDepth(60)
       : null;
   }
 
@@ -83,7 +87,7 @@ class PlayerView {
     }
     if (bag !== this.bagLevel) {
       this.bagLevel = bag;
-      this.bag.setVisible(bag > 0).setFillStyle(BAG_COLORS[bag]).setStrokeStyle(2, 0x222222);
+      this.bag.setVisible(bag > 0).setFillStyle(BAG_COLORS[bag]).setStrokeStyle(2.5, OUTLINE);
     }
     this.healRing.setVisible((flags & PFLAG_HEALING) !== 0);
     const alpha = flags & PFLAG_DISCONNECTED ? 0.45 : 1;
@@ -161,44 +165,56 @@ export class GameScene extends Phaser.Scene {
   create() {
     this.makeTextures();
     const map = this.session.map;
-    this.cameras.main.setBackgroundColor('#2c4a22');
+    this.cameras.main.setBackgroundColor('#2f9be0');
+
+    const shore = this.add.graphics().setDepth(-1);
+    shore.fillStyle(0x6cc4f0, 1);
+    shore.fillRoundedRect(-150, -150, MAP_SIZE + 300, MAP_SIZE + 300, 160);
+    shore.fillStyle(0xf6dc95, 1);
+    shore.fillRoundedRect(-80, -80, MAP_SIZE + 160, MAP_SIZE + 160, 90);
 
     this.add.tileSprite(0, 0, MAP_SIZE, MAP_SIZE, 'grass').setOrigin(0, 0).setDepth(0);
 
     const decor = this.add.graphics().setDepth(1);
     for (const d of map.decor) {
-      decor.fillStyle(d.color, 0.35);
+      decor.fillStyle(d.color, 0.45);
       decor.fillCircle(d.x, d.y, d.r);
     }
-    decor.lineStyle(6, 0x1d3315, 1);
+    decor.lineStyle(8, 0x4f9a2c, 1);
     decor.strokeRect(0, 0, MAP_SIZE, MAP_SIZE);
 
     const floors = this.add.graphics().setDepth(2);
     for (const h of map.houses) {
       floors.fillStyle(h.floor, 1);
       floors.fillRect(h.x, h.y, h.w, h.h);
-      floors.lineStyle(1, 0x000000, 0.15);
-      for (let y = h.y + 24; y < h.y + h.h; y += 24) floors.lineBetween(h.x, y, h.x + h.w, y);
+      floors.lineStyle(2, 0x8a5a2b, 0.25);
+      for (let y = h.y + 28; y < h.y + h.h; y += 28) floors.lineBetween(h.x, y, h.x + h.w, y);
     }
 
     const solid = this.add.graphics().setDepth(5);
     for (const w of map.walls) {
-      solid.fillStyle(w.houseId >= 0 ? 0x4a3b30 : 0x6b6b6b, 1);
+      solid.fillStyle(w.houseId >= 0 ? 0xf7ead0 : 0xb9c4cc, 1);
       solid.fillRect(w.x, w.y, w.w, w.h);
-      solid.lineStyle(2, 0x222222, 1);
+      solid.lineStyle(3, w.houseId >= 0 ? 0x6b3e1e : 0x3e4a56, 1);
       solid.strokeRect(w.x, w.y, w.w, w.h);
     }
     for (const r of map.rocks) {
-      solid.fillStyle(0x7d7d7d, 1);
+      solid.fillStyle(0x000000, 0.18);
+      solid.fillCircle(r.x + 5, r.y + 7, r.r);
+      solid.fillStyle(0xa9b7c2, 1);
       solid.fillCircle(r.x, r.y, r.r);
-      solid.fillStyle(0x969696, 1);
-      solid.fillCircle(r.x - r.r * 0.2, r.y - r.r * 0.2, r.r * 0.6);
-      solid.lineStyle(3, 0x4d4d4d, 1);
+      solid.fillStyle(0xd4dee6, 1);
+      solid.fillCircle(r.x - r.r * 0.22, r.y - r.r * 0.24, r.r * 0.58);
+      solid.fillStyle(0xf2f7fa, 0.9);
+      solid.fillCircle(r.x - r.r * 0.38, r.y - r.r * 0.4, r.r * 0.18);
+      solid.lineStyle(4, 0x3e4a56, 1);
       solid.strokeCircle(r.x, r.y, r.r);
     }
     for (const t of map.trees) {
-      solid.fillStyle(0x5a3d22, 1);
+      solid.fillStyle(0x8a5a2b, 1);
       solid.fillCircle(t.x, t.y, t.r);
+      solid.lineStyle(3, 0x4a2c10, 1);
+      solid.strokeCircle(t.x, t.y, t.r);
       const canopyR = t.r * 2.4;
       const img = this.add.image(t.x, t.y, 'canopy').setDisplaySize(canopyR * 2, canopyR * 2).setDepth(20);
       img.rotation = (t.id * 1.7) % (Math.PI * 2);
@@ -206,16 +222,16 @@ export class GameScene extends Phaser.Scene {
     }
 
     for (const d of map.doors) {
-      const rect = this.add.rectangle(d.x + d.w / 2, d.y + d.h / 2, d.w, d.h, 0x8b5a2b).setStrokeStyle(2, 0x3b2410).setDepth(4);
+      const rect = this.add.rectangle(d.x + d.w / 2, d.y + d.h / 2, d.w, d.h, 0xc77a3a).setStrokeStyle(3, 0x5a3010).setDepth(4);
       this.doorViews.set(d.id, rect);
       this.setDoor(d.id, this.session.world.doorOpen[d.id]);
     }
 
     for (const c of map.chests) {
       if (!this.session.world.chestAlive[c.id]) continue;
-      const box = this.add.rectangle(0, 0, CHEST_SIZE, CHEST_SIZE, 0xa8732e).setStrokeStyle(3, 0x4a2f10);
-      const band = this.add.rectangle(0, 0, CHEST_SIZE, 8, 0x5a3a14);
-      const lock = this.add.rectangle(0, 0, 10, 12, 0xf4d03f).setStrokeStyle(1, 0x5a3a14);
+      const box = this.add.rectangle(0, 0, CHEST_SIZE, CHEST_SIZE, 0xd9893a).setStrokeStyle(4, 0x5a2e0a);
+      const band = this.add.rectangle(0, 0, CHEST_SIZE, 9, 0x8a4a14);
+      const lock = this.add.rectangle(0, 0, 12, 14, 0xffd23f).setStrokeStyle(2, 0x5a2e0a);
       const cont = this.add.container(c.x, c.y, [box, band, lock]).setDepth(5);
       this.chestViews.set(c.id, cont);
     }
@@ -224,7 +240,7 @@ export class GameScene extends Phaser.Scene {
       const house = map.houses[room.houseId];
       const roof = this.add
         .rectangle(room.x + room.w / 2, room.y + room.h / 2, room.w + WALL_THICKNESS, room.h + WALL_THICKNESS, house.roof)
-        .setStrokeStyle(3, 0x000000, 0.35)
+        .setStrokeStyle(5, 0x10284d, 0.55)
         .setDepth(30);
       this.roofs.set(room.id, roof);
     }
@@ -243,28 +259,34 @@ export class GameScene extends Phaser.Scene {
   private makeTextures() {
     if (!this.textures.exists('grass')) {
       const g = this.add.graphics();
-      g.fillStyle(0x5b8f3b, 1);
+      g.fillStyle(0x7ccf4f, 1);
       g.fillRect(0, 0, 128, 128);
-      for (let i = 0; i < 60; i++) {
-        g.fillStyle(i % 2 ? 0x548636 : 0x63984a, 0.8);
+      for (let i = 0; i < 70; i++) {
+        g.fillStyle(i % 3 === 0 ? 0x9be36a : 0x6cbf3f, 0.9);
         const x = (i * 37) % 128;
         const y = (i * 53) % 128;
-        g.fillRect(x, y, 2, 5);
+        g.fillTriangle(x, y + 6, x + 2, y, x + 4, y + 6);
       }
-      g.lineStyle(1, 0x4f8032, 0.5);
-      g.strokeRect(0, 0, 128, 128);
+      g.fillStyle(0xffffff, 0.8);
+      g.fillCircle(30, 90, 2);
+      g.fillStyle(0xffe066, 0.9);
+      g.fillCircle(96, 34, 2);
       g.generateTexture('grass', 128, 128);
       g.destroy();
     }
     if (!this.textures.exists('canopy')) {
       const g = this.add.graphics();
-      g.fillStyle(0x2b5e24, 0.96);
+      g.fillStyle(0x1f5e1a, 1);
       g.fillCircle(64, 64, 64);
-      g.fillStyle(0x3a7a30, 0.9);
-      g.fillCircle(52, 54, 40);
-      g.fillCircle(80, 76, 30);
-      g.fillStyle(0x4b8f3c, 0.6);
-      g.fillCircle(46, 46, 18);
+      g.fillStyle(0x3fa02e, 1);
+      g.fillCircle(64, 64, 59);
+      g.fillStyle(0x5cc23f, 1);
+      g.fillCircle(54, 54, 40);
+      g.fillCircle(84, 78, 26);
+      g.fillCircle(40, 84, 20);
+      g.fillStyle(0x8ee35f, 0.9);
+      g.fillCircle(46, 44, 18);
+      g.fillCircle(80, 70, 10);
       g.generateTexture('canopy', 128, 128);
       g.destroy();
     }
@@ -274,7 +296,7 @@ export class GameScene extends Phaser.Scene {
     const rect = this.doorViews.get(id);
     if (!rect) return;
     rect.setAlpha(open ? 0.25 : 1);
-    rect.setFillStyle(open ? 0xc9a27a : 0x8b5a2b);
+    rect.setFillStyle(open ? 0xf0c890 : 0xc77a3a);
   }
 
   removeChest(id: number) {
@@ -299,22 +321,23 @@ export class GameScene extends Phaser.Scene {
     const [id, item, x, y, amount] = l;
     this.lootViews.get(id)?.destroy();
     const def = ITEMS[item];
-    const bg = this.add.circle(0, 0, 17, 0x111111, 0.55).setStrokeStyle(2, def.color === 0x333333 ? 0xdddddd : def.color);
-    const parts: Phaser.GameObjects.GameObject[] = [bg];
+    const ring = this.add.circle(0, 0, 19, def.color === 0x333333 ? 0x5a6a7a : def.color).setStrokeStyle(3, OUTLINE);
+    const bg = this.add.circle(0, 0, 14, 0xffffff, 0.95);
+    const parts: Phaser.GameObjects.GameObject[] = [ring, bg];
     const label = lootShortLabel(item);
     if (label) {
-      parts.push(this.add.text(0, 0, label, { fontFamily: 'sans-serif', fontSize: '11px', fontStyle: 'bold', color: '#ffffff' }).setOrigin(0.5));
+      parts.push(this.add.text(0, 0, label, { fontFamily: "'Baloo 2', sans-serif", fontSize: '12px', fontStyle: 'bold', color: '#10284d' }).setOrigin(0.5));
     } else {
       parts.push(this.add.text(0, 1, def.icon, { fontSize: '17px' }).setOrigin(0.5));
     }
     const levelMatch = /(\d)$/.exec(item);
     if ((def.kind === 'armor' || def.kind === 'bag') && levelMatch) {
-      parts.push(this.add.circle(12, -12, 7, 0xf4b63f).setStrokeStyle(1, 0x000000));
-      parts.push(this.add.text(12, -12, levelMatch[1], { fontFamily: 'sans-serif', fontSize: '10px', fontStyle: 'bold', color: '#000' }).setOrigin(0.5));
+      parts.push(this.add.circle(13, -13, 8, 0xffc21a).setStrokeStyle(2, OUTLINE));
+      parts.push(this.add.text(13, -13, levelMatch[1], { fontFamily: "'Baloo 2', sans-serif", fontSize: '11px', fontStyle: 'bold', color: '#10284d' }).setOrigin(0.5));
     }
     const name = this.add
       .text(0, 26, def.kind === 'ammo' ? `${def.name} ×${amount}` : def.name, {
-        fontFamily: 'sans-serif', fontSize: '11px', color: '#fff', stroke: '#000', strokeThickness: 3,
+        fontFamily: "'Baloo 2', sans-serif", fontSize: '13px', fontStyle: 'bold', color: '#fff', stroke: '#10284d', strokeThickness: 4,
       })
       .setOrigin(0.5, 0)
       .setVisible(false);
@@ -422,7 +445,7 @@ export class GameScene extends Phaser.Scene {
 
   private floatText(x: number, y: number, text: string, color: string) {
     const t = this.add
-      .text(x + (Math.random() - 0.5) * 20, y, text, { fontFamily: 'sans-serif', fontSize: '18px', fontStyle: 'bold', color, stroke: '#000', strokeThickness: 4 })
+      .text(x + (Math.random() - 0.5) * 20, y, text, { fontFamily: "'Baloo 2', sans-serif", fontSize: '22px', fontStyle: 'bold', color, stroke: '#7a3800', strokeThickness: 5 })
       .setOrigin(0.5)
       .setDepth(61);
     this.tweens.add({ targets: t, y: y - 40, alpha: 0, duration: 700, onComplete: () => t.destroy() });
