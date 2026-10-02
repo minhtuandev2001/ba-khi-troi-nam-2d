@@ -21,7 +21,8 @@ import {
   type WeaponId,
 } from '../shared';
 import { settings } from '../settings';
-import { falloff, sfx } from './audio';
+import { sfx, spotAt, startAmbient, stopAmbient } from './audio';
+import { RARITY_COLOR, iconImages, iconTextureKey, rarityOf } from './icons';
 import type { GameSession } from './session';
 
 const ARMOR_COLORS = [0, 0xc9d6e0, 0x3fa3ff, 0x2b2f6b];
@@ -157,6 +158,8 @@ export class GameScene extends Phaser.Scene {
   private zoneGfx!: Phaser.GameObjects.Graphics;
   private currentZoom = 1;
   private fpsTimer = 0;
+  private lastStepPos = { x: 0, y: 0 };
+  private stepDistance = 0;
 
   constructor(private readonly session: GameSession) {
     super({ key: 'game' });
@@ -253,6 +256,9 @@ export class GameScene extends Phaser.Scene {
       this.updateZoom(true);
     });
     this.updateZoom(true);
+    startAmbient();
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, stopAmbient);
+    this.events.once(Phaser.Scenes.Events.DESTROY, stopAmbient);
     this.session.onSceneReady(this);
   }
 
@@ -321,22 +327,23 @@ export class GameScene extends Phaser.Scene {
     const [id, item, x, y, amount] = l;
     this.lootViews.get(id)?.destroy();
     const def = ITEMS[item];
-    const ring = this.add.circle(0, 0, 19, def.color === 0x333333 ? 0x5a6a7a : def.color).setStrokeStyle(3, OUTLINE);
-    const bg = this.add.circle(0, 0, 14, 0xffffff, 0.95);
-    const parts: Phaser.GameObjects.GameObject[] = [ring, bg];
-    const label = lootShortLabel(item);
-    if (label) {
-      parts.push(this.add.text(0, 0, label, { fontFamily: "'Baloo 2', sans-serif", fontSize: '12px', fontStyle: 'bold', color: '#10284d' }).setOrigin(0.5));
-    } else {
-      parts.push(this.add.text(0, 1, def.icon, { fontSize: '17px' }).setOrigin(0.5));
-    }
-    const levelMatch = /(\d)$/.exec(item);
-    if ((def.kind === 'armor' || def.kind === 'bag') && levelMatch) {
-      parts.push(this.add.circle(13, -13, 8, 0xffc21a).setStrokeStyle(2, OUTLINE));
-      parts.push(this.add.text(13, -13, levelMatch[1], { fontFamily: "'Baloo 2', sans-serif", fontSize: '11px', fontStyle: 'bold', color: '#10284d' }).setOrigin(0.5));
-    }
+    const rarity = rarityOf(item);
+    const color = RARITY_COLOR[rarity];
+    const shadow = this.add.ellipse(2, 18, 40, 12, 0x10284d, 0.22);
+    const glow = this.add.circle(0, 0, 27, color, 0.3);
+    glow.setName('glow');
+    const outer = this.add.circle(0, 0, 22.5, OUTLINE);
+    const disc = this.add.circle(0, 0, 20, 0xffffff, 0.96).setStrokeStyle(4, color);
+    const sheen = this.add.ellipse(-6, -9, 18, 8, 0xffffff, 0.9);
+    const parts: Phaser.GameObjects.GameObject[] = [shadow, glow, outer, disc, sheen];
+    const key = this.ensureIcon(item);
+    const icon = key
+      ? this.add.image(0, 0, key).setDisplaySize(34, 34)
+      : this.add.text(0, 1, def.icon, { fontSize: '18px' }).setOrigin(0.5);
+    icon.setName('icon');
+    parts.push(icon);
     const name = this.add
-      .text(0, 26, def.kind === 'ammo' ? `${def.name} ×${amount}` : def.name, {
+      .text(0, 28, def.kind === 'ammo' ? `${def.name} ×${amount}` : def.name, {
         fontFamily: "'Baloo 2', sans-serif", fontSize: '13px', fontStyle: 'bold', color: '#fff', stroke: '#10284d', strokeThickness: 4,
       })
       .setOrigin(0.5, 0)
@@ -344,7 +351,18 @@ export class GameScene extends Phaser.Scene {
     name.setName('name');
     parts.push(name);
     const cont = this.add.container(x, y, parts).setDepth(3);
+    cont.setData('phase', (id * 0.83) % (Math.PI * 2));
+    cont.setData('shine', rarity === 'epic' || rarity === 'legendary');
     this.lootViews.set(id, cont);
+  }
+
+  private ensureIcon(item: ItemId): string | null {
+    const key = iconTextureKey(item);
+    if (this.textures.exists(key)) return key;
+    const img = iconImages.get(item);
+    if (!img || !img.complete || img.naturalWidth === 0) return null;
+    this.textures.addImage(key, img);
+    return key;
   }
 
   removeLoot(id: number) {
@@ -355,7 +373,7 @@ export class GameScene extends Phaser.Scene {
   // ---------------------------------------------------------------- events
 
   handleEvent(e: GameEvent, listener: { x: number; y: number }) {
-    const vol = (x: number, y: number) => falloff(Math.hypot(x - listener.x, y - listener.y));
+    const at = (x: number, y: number) => spotAt(x - listener.x, y - listener.y);
     switch (e.k) {
       case 'shot': {
         const view = this.players.get(e.pid);
@@ -369,7 +387,7 @@ export class GameScene extends Phaser.Scene {
           width: e.w === 'sniper' ? 3 : 2, color: e.w === 'sniper' ? 0xbfe6ff : 0xfff1a8,
         });
         this.flash(origin.x + dx * 6, origin.y + dy * 6);
-        sfx.shot(e.w, vol(e.x, e.y));
+        sfx.shot(e.w, at(e.x, e.y), e.pid === this.session.viewPid);
         if (e.pid === this.session.viewPid && settings.screenShake && (e.w === 'shotgun' || e.w === 'sniper')) {
           this.cameras.main.shake(80, 0.003);
         }
@@ -379,46 +397,49 @@ export class GameScene extends Phaser.Scene {
         const t = this.tracers.find((tr) => tr.id === e.id);
         if (t) t.maxDist = Math.min(t.maxDist, Math.hypot(e.x - t.x, e.y - t.y));
         this.particles(e.x, e.y, e.blood ? 0xc0392b : 0xcfcfcf, e.blood ? 6 : 3);
-        if (e.blood) sfx.hit(vol(e.x, e.y) * 0.8);
+        if (e.blood) sfx.hit(at(e.x, e.y));
         break;
       }
       case 'melee': {
         this.players.get(e.pid)?.punch();
         const v = this.players.get(e.pid);
-        if (v) sfx.melee(vol(v.container.x, v.container.y));
+        if (v) sfx.melee(at(v.container.x, v.container.y));
         break;
       }
       case 'boom': {
         const ring = this.add.circle(e.x, e.y, 20, 0xff9a2e, 0.85).setDepth(46);
         this.tweens.add({ targets: ring, radius: 170, alpha: 0, duration: 450, onComplete: () => ring.destroy() });
         this.particles(e.x, e.y, 0x555555, 14, 120);
-        sfx.boom(vol(e.x, e.y));
+        sfx.boom(at(e.x, e.y));
         const d = Math.hypot(e.x - listener.x, e.y - listener.y);
         if (settings.screenShake && d < 700) this.cameras.main.shake(300, 0.012 * (1 - d / 700));
         break;
       }
       case 'reload': {
         const v = this.players.get(e.pid);
-        if (v) sfx.reload(vol(v.container.x, v.container.y));
+        if (v) sfx.reload(at(v.container.x, v.container.y));
         break;
       }
       case 'throw': {
         const v = this.players.get(e.pid);
-        if (v) sfx.throwItem(vol(v.container.x, v.container.y));
+        if (v) sfx.throwItem(at(v.container.x, v.container.y));
         break;
       }
       case 'door': {
         this.setDoor(e.id, e.open);
         const d = this.session.map.doors[e.id];
-        sfx.door(vol(d.x, d.y));
+        sfx.door(at(d.x, d.y));
         break;
       }
-      case 'chest':
+      case 'chest': {
+        const c = this.chestViews.get(e.id);
+        if (c) sfx.chest(at(c.x, c.y));
         this.removeChest(e.id);
         break;
+      }
       case 'dmg':
         if (settings.damageNumbers) this.floatText(e.x, e.y - 20, String(e.n), '#ffe066');
-        sfx.hit(0.9);
+        sfx.hitMarker();
         break;
       default:
         break;
@@ -487,6 +508,7 @@ export class GameScene extends Phaser.Scene {
     this.cameras.main.centerOn(view.x, view.y);
 
     const room = roomAt(s.map, view.x, view.y);
+    this.footsteps(view.x, view.y, room >= 0);
     for (const [id, roof] of this.roofs) {
       const target = id === room ? 0 : 1;
       roof.alpha += (target - roof.alpha) * Math.min(1, delta / 80);
@@ -497,9 +519,16 @@ export class GameScene extends Phaser.Scene {
       c.img.alpha += (target - c.img.alpha) * Math.min(1, delta / 100);
     }
 
+    const cam = this.cameras.main.worldView;
+    const t = now / 1000;
     for (const cont of this.lootViews.values()) {
       const near = Math.abs(cont.x - view.x) < 110 && Math.abs(cont.y - view.y) < 110;
       (cont.getByName('name') as Phaser.GameObjects.Text | null)?.setVisible(near);
+      if (!cam.contains(cont.x, cont.y)) continue;
+      const phase = cont.getData('phase') as number;
+      (cont.getByName('icon') as Phaser.GameObjects.Image | null)?.setY(Math.sin(t * 2.4 + phase) * 2);
+      const glow = cont.getByName('glow') as Phaser.GameObjects.Arc | null;
+      if (glow) glow.setAlpha(cont.getData('shine') ? 0.3 + 0.25 * Math.sin(t * 3 + phase) : 0.3);
     }
 
     this.drawTracers(now);
@@ -513,6 +542,16 @@ export class GameScene extends Phaser.Scene {
       this.fpsTimer = 0;
       s.hud.fps(settings.showFps ? `${Math.round(this.game.loop.actualFps)} FPS · ping ${s.ping} ms` : null);
     }
+  }
+
+  private footsteps(x: number, y: number, indoors: boolean) {
+    const moved = Math.hypot(x - this.lastStepPos.x, y - this.lastStepPos.y);
+    this.lastStepPos = { x, y };
+    if (moved > 200) return;
+    this.stepDistance += moved;
+    if (this.stepDistance < 75) return;
+    this.stepDistance = 0;
+    sfx.step(indoors ? 'wood' : 'grass');
   }
 
   private drawTracers(now: number) {
@@ -623,24 +662,5 @@ export class GameScene extends Phaser.Scene {
   /** Angle difference helper used to keep remote rotation smooth. */
   static lerpAngle(a: number, b: number, k: number): number {
     return a + angleDiff(a, b) * k;
-  }
-}
-
-function lootShortLabel(item: ItemId): string | null {
-  switch (item) {
-    case 'ammo_9mm': return '9mm';
-    case 'ammo_556': return '5.56';
-    case 'ammo_12g': return '12G';
-    case 'ammo_762': return '7.62';
-    case 'scope2': return 'x2';
-    case 'scope3': return 'x3';
-    case 'scope4': return 'x4';
-    case 'scope6': return 'x6';
-    case 'scope8': return 'x8';
-    case 'rifle': return 'AR';
-    case 'shotgun': return 'SG';
-    case 'sniper': return 'SR';
-    case 'pistol': return 'P';
-    default: return null;
   }
 }

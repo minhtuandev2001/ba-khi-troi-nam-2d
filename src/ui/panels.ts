@@ -14,6 +14,7 @@ import {
 } from '../shared';
 import { saveSettings, settings, type Settings } from '../settings';
 import { esc, formatDuration } from './dom';
+import { RARITY_NAME, iconSvg, rarityCss, rarityOf, type IconId } from '../game/icons';
 
 export const KEYBINDS: [string, string][] = [
   ['W A S D / Phím mũi tên', 'Di chuyển'],
@@ -92,18 +93,25 @@ function weaponStats(id: WeaponId): string {
   return `Sát thương ${dmg} · ${w.fireRate} phát/giây · băng ${w.magSize} viên · thay đạn ${w.reloadMs / 1000}s · tầm ${w.range} · độ tản ${w.spread}° · ${AMMO_NAMES[w.ammo!]}`;
 }
 
+function itemIconBox(id: IconId): string {
+  return `<div class="ic" style="--rarity:${rarityCss(id)}">${iconSvg(id, 44)}</div>`;
+}
+
+function rarityTag(id: IconId): string {
+  return `<span class="rarity" style="--rarity:${rarityCss(id)}">${RARITY_NAME[rarityOf(id)]}</span>`;
+}
+
 export function itemsPanel(): string {
   const weapons = (['fists', 'knife', 'pistol', 'rifle', 'shotgun', 'sniper'] as WeaponId[])
     .map((id) => {
       const w = WEAPONS[id];
-      const icon = id === 'fists' ? '👊' : ITEMS[id as keyof typeof ITEMS]?.icon ?? '🔫';
-      return `<div class="item-row"><div class="ic">${icon}</div><div><h4>${esc(w.name)}</h4><p>${esc(w.desc)}</p><div class="statline">${esc(weaponStats(id))}</div></div></div>`;
+      return `<div class="item-row">${itemIconBox(id)}<div><h4>${esc(w.name)} ${rarityTag(id)}</h4><p>${esc(w.desc)}</p><div class="statline">${esc(weaponStats(id))}</div></div></div>`;
     })
     .join('');
   const others = ITEM_IDS.filter((id) => ITEMS[id].kind !== 'weapon')
     .map((id) => {
       const it = ITEMS[id];
-      return `<div class="item-row"><div class="ic">${it.icon}</div><div><h4>${esc(it.name)}</h4><p>${esc(it.desc)}</p><div class="statline">Nơi tìm thấy: ${esc(it.source)}</div></div></div>`;
+      return `<div class="item-row">${itemIconBox(id)}<div><h4>${esc(it.name)} ${rarityTag(id)}</h4><p>${esc(it.desc)}</p><div class="statline">Nơi tìm thấy: ${esc(it.source)}</div></div></div>`;
     })
     .join('');
   const bagRows = ([0, 1, 2, 3] as const)
@@ -131,6 +139,7 @@ export function settingsPanel(): string {
     <div class="field"><label>Âm lượng: <b id="vol-label">${Math.round(s.volume * 100)}%</b></label>
       <div class="slider-row"><input type="range" min="0" max="100" value="${Math.round(s.volume * 100)}" data-setting="volume" /></div></div>
     <div class="field"><label><input type="checkbox" data-setting="sfx" ${s.sfx ? 'checked' : ''}/> Bật hiệu ứng âm thanh</label></div>
+    <div class="field"><label><input type="checkbox" data-setting="ambient" ${s.ambient ? 'checked' : ''}/> Âm thanh môi trường (gió, sóng, chim hót)</label></div>
     <div class="field"><label><input type="checkbox" data-setting="damageNumbers" ${s.damageNumbers ? 'checked' : ''}/> Hiện số sát thương</label></div>
     <div class="field"><label><input type="checkbox" data-setting="screenShake" ${s.screenShake ? 'checked' : ''}/> Rung màn hình</label></div>
     <div class="field"><label><input type="checkbox" data-setting="showFps" ${s.showFps ? 'checked' : ''}/> Hiện FPS và ping</label></div>

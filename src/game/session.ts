@@ -36,7 +36,7 @@ import {
 } from '../shared';
 import { settings, useTouchControls } from '../settings';
 import { esc, toast } from '../ui/dom';
-import { sfx, unlockAudio } from './audio';
+import { sfx, stopAmbient, unlockAudio } from './audio';
 import { GameScene } from './GameScene';
 import { Hud } from './Hud';
 import { TouchControls, type TouchButton } from './Touch';
@@ -488,7 +488,7 @@ export class GameSession {
       case 'pickup': {
         const def = ITEMS[e.item];
         this.hud.feed(`Đã nhặt <b>${esc(def.name)}</b>${def.kind === 'ammo' ? ` ×${e.amount}` : ''}`);
-        sfx.pickup();
+        sfx.pickup(e.item);
         break;
       }
       case 'notice':
@@ -509,7 +509,7 @@ export class GameSession {
 
   private onEnd = (msg: MatchEndMsg) => {
     this.ended = true;
-    if (msg.placement === 1) sfx.kill();
+    if (msg.placement === 1) sfx.victory();
     this.hud.showEnd(msg, () => this.exit());
   };
 
@@ -625,6 +625,7 @@ export class GameSession {
     for (const fn of this.cleanups) fn();
     this.touch?.destroy();
     this.hud.destroy();
+    stopAmbient();
     this.game.destroy(true);
   }
 }

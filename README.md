@@ -42,7 +42,8 @@ src/game/GameScene.ts  vẽ bản đồ, người chơi, mái nhà, khói, hiệ
 src/game/Hud.ts     thanh máu, ô vũ khí, kill feed, túi đồ, bản đồ, màn hình chết/kết thúc
 src/game/Minimap.ts minimap và bản đồ lớn
 src/game/Touch.ts   điều khiển cảm ứng
-src/game/audio.ts   âm thanh tổng hợp bằng WebAudio
+src/game/audio.ts   âm thanh tổng hợp bằng WebAudio (không dùng file), có âm thanh môi trường
+src/game/icons.ts   biểu tượng vật phẩm vẽ bằng SVG và bảng độ hiếm
 src/shared/         hằng số, vật phẩm, bản đồ, va chạm, giao thức mạng
 ```
 

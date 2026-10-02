@@ -1,4 +1,5 @@
 import { settings } from '../settings';
+import { iconSvg, type IconId } from './icons';
 
 interface Stick {
   zone: HTMLElement;
@@ -39,16 +40,17 @@ export class TouchControls {
     const col1 = 12;
     const col2 = col1 + size + gap;
     const row = (i: number) => `calc(max(10px, env(safe-area-inset-bottom)) + ${i * (size + gap)}px)`;
+    const ic = (id: IconId) => iconSvg(id, Math.round(size * 0.62));
     const defs: [TouchButton, string, string, number][] = [
-      ['heal', '➕', `right:${col1}px;bottom:${row(0)}`, size],
+      ['heal', ic('medkit'), `right:${col1}px;bottom:${row(0)}`, size],
       ['reload', '<small>R</small>', `right:${col1}px;bottom:${row(1)}`, size],
       ['interact', '<small>NHẶT</small>', `right:${col1 - (big - size) / 2}px;bottom:${row(2)}`, big],
-      ['smoke', '💨', `right:${col2}px;bottom:${row(0)}`, size],
-      ['grenade', '💣', `right:${col2}px;bottom:${row(1)}`, size],
+      ['smoke', ic('smoke'), `right:${col2}px;bottom:${row(0)}`, size],
+      ['grenade', ic('grenade'), `right:${col2}px;bottom:${row(1)}`, size],
       ['pause', '⏸', `left:10px;top:${56}px`, size],
-      ['scope', '🔭', `left:10px;top:${56 + (size + gap)}px`, size],
+      ['scope', ic('scope4'), `left:10px;top:${56 + (size + gap)}px`, size],
       ['map', '🗺️', `left:10px;top:${56 + 2 * (size + gap)}px`, size],
-      ['inventory', '🎒', `left:10px;top:${56 + 3 * (size + gap)}px`, size],
+      ['inventory', ic('bag2'), `left:10px;top:${56 + 3 * (size + gap)}px`, size],
     ];
     for (const [id, label, style, px] of defs) {
       const btn = document.createElement('div');

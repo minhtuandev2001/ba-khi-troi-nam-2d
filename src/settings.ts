@@ -1,6 +1,7 @@
 export interface Settings {
   volume: number;
   sfx: boolean;
+  ambient: boolean;
   showFps: boolean;
   damageNumbers: boolean;
   touchControls: 'auto' | 'on' | 'off';
@@ -14,6 +15,7 @@ const KEY = 'br2d_settings';
 const DEFAULTS: Settings = {
   volume: 0.6,
   sfx: true,
+  ambient: true,
   showFps: false,
   damageNumbers: true,
   touchControls: 'auto',
@@ -32,9 +34,16 @@ function load(): Settings {
 
 export const settings: Settings = load();
 
+const listeners = new Set<(s: Settings) => void>();
+
+export function onSettingsChange(fn: (s: Settings) => void): void {
+  listeners.add(fn);
+}
+
 export function saveSettings(patch: Partial<Settings>) {
   Object.assign(settings, patch);
   localStorage.setItem(KEY, JSON.stringify(settings));
+  for (const fn of listeners) fn(settings);
 }
 
 export function isTouchDevice(): boolean {

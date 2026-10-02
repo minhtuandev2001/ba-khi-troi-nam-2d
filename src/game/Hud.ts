@@ -2,7 +2,6 @@ import {
   AMMO_NAMES,
   AMMO_TYPES,
   BAG_CAPACITY,
-  ITEMS,
   MAX_HP,
   MODE_NAMES,
   WEAPONS,
@@ -18,6 +17,7 @@ import {
 } from '../shared';
 import { esc, formatDuration, html } from '../ui/dom';
 import { bindSettings, guidePanel, keysPanel, settingsPanel } from '../ui/panels';
+import { iconHtml, iconSvg, rarityCss, type IconId } from './icons';
 import { MapRenderer } from './Minimap';
 
 export interface HudCallbacks {
@@ -165,17 +165,17 @@ export class Hud {
     this.slotSig = sig;
     const gun = (slot: 'p1' | 'p2' | 'pistol') => {
       const s = me[slot];
-      if (!s) return `<div class="slot empty" data-slot="${slot}"><span class="k">${SLOT_KEYS[slot]}</span><div class="n">${slot === 'pistol' ? 'Súng lục' : 'Trống'}</div><div class="a">&nbsp;</div></div>`;
+      if (!s) return `<div class="slot empty" data-slot="${slot}"><span class="k">${SLOT_KEYS[slot]}</span><div class="si"></div><div class="n">${slot === 'pistol' ? 'Súng lục' : 'Trống'}</div><div class="a">&nbsp;</div></div>`;
       const def = WEAPONS[s.w];
-      return `<div class="slot ${me.active === slot ? 'active' : ''}" data-slot="${slot}"><span class="k">${SLOT_KEYS[slot]}</span><div class="n">${esc(def.name)}</div><div class="a">${s.mag} / ${me.ammo[def.ammo!]}</div></div>`;
+      return `<div class="slot ${me.active === slot ? 'active' : ''}" data-slot="${slot}"><span class="k">${SLOT_KEYS[slot]}</span><div class="si">${iconSvg(s.w, 30)}</div><div class="n">${esc(def.name)}</div><div class="a">${s.mag} / ${me.ammo[def.ammo!]}</div></div>`;
     };
-    const simple = (slot: SlotName, name: string, count: string, empty: boolean) =>
-      `<div class="slot ${me.active === slot ? 'active' : ''} ${empty ? 'empty' : ''}" data-slot="${slot}"><span class="k">${SLOT_KEYS[slot]}</span><div class="n">${name}</div><div class="a">${count}</div></div>`;
+    const simple = (slot: SlotName, icon: IconId, name: string, count: string, empty: boolean) =>
+      `<div class="slot ${me.active === slot ? 'active' : ''} ${empty ? 'empty' : ''}" data-slot="${slot}"><span class="k">${SLOT_KEYS[slot]}</span><div class="si">${iconSvg(icon, 30)}</div><div class="n">${name}</div><div class="a">${count}</div></div>`;
     this.el.slots.innerHTML =
       gun('p1') + gun('p2') + gun('pistol') +
-      simple('melee', WEAPONS[me.melee].name, '&nbsp;', false) +
-      simple('grenade', '💣 Lựu đạn', `×${me.gren}`, me.gren === 0) +
-      simple('smoke', '💨 Khói', `×${me.smoke}`, me.smoke === 0);
+      simple('melee', me.melee, WEAPONS[me.melee].name, '&nbsp;', false) +
+      simple('grenade', 'grenade', 'Lựu đạn', `×${me.gren}`, me.gren === 0) +
+      simple('smoke', 'smoke', 'Khói', `×${me.smoke}`, me.smoke === 0);
   }
 
   private renderInventorySummary(me: SelfNet) {
@@ -183,12 +183,13 @@ export class Hud {
     if (sig === this.invSig) return;
     this.invSig = sig;
     const cap = BAG_CAPACITY[me.bag];
-    this.el.inv.innerHTML = `
-      <div>🦺 Giáp: ${me.armor ? `cấp ${me.armor} (${me.armorDur})` : 'không có'}</div>
-      <div>🎒 Túi: ${me.bag ? `cấp ${me.bag}` : 'không có'}</div>
-      <div>🔭 Ống nhắm: x${me.scope}</div>
-      <div>➕ Cứu thương: ${me.med}/${cap.medkit} <span class="kbd">Q</span></div>
-      ${AMMO_TYPES.map((t) => `<div>${ITEMS[`ammo_${t}`].icon} ${AMMO_NAMES[t]}: ${me.ammo[t]}/${cap.ammo[t]}</div>`).join('')}`;
+    const row = (icon: IconId, text: string) => `<div>${iconHtml(icon, 20)}<span>${text}</span></div>`;
+    this.el.inv.innerHTML =
+      row(me.armor ? (`armor${me.armor}` as IconId) : 'armor1', `Giáp: ${me.armor ? `cấp ${me.armor} (${me.armorDur})` : 'không có'}`) +
+      row(me.bag ? (`bag${me.bag}` as IconId) : 'bag1', `Túi: ${me.bag ? `cấp ${me.bag}` : 'không có'}`) +
+      row(me.scope > 1 ? (`scope${me.scope}` as IconId) : 'scope2', `Ống nhắm: x${me.scope}`) +
+      row('medkit', `Cứu thương: ${me.med}/${cap.medkit} <span class="kbd">Q</span>`) +
+      AMMO_TYPES.map((t) => row(`ammo_${t}`, `${AMMO_NAMES[t]}: ${me.ammo[t]}/${cap.ammo[t]}`)).join('');
   }
 
   feed(htmlText: string, mine = false) {
@@ -268,24 +269,28 @@ export class Hud {
     if (!force && box.dataset.sig === sig) return;
     box.dataset.sig = sig;
     const cap = BAG_CAPACITY[me.bag];
-    const cell = (title: string, body: string, drop?: string) =>
-      `<div class="inv-cell"><b>${title}</b><div class="muted">${body}</div>${drop ? `<button class="btn small" data-drop="${drop}">Vứt</button>` : ''}</div>`;
+    const cell = (icon: IconId, has: boolean, title: string, body: string, drop?: string) =>
+      `<div class="inv-cell ${has ? '' : 'empty'}" style="--rarity:${rarityCss(icon)}">` +
+      `<div class="inv-ic">${iconSvg(icon, 40)}</div>` +
+      `<div class="inv-text"><b>${title}</b><div class="muted">${body}</div></div>` +
+      `${drop ? `<button class="btn small" data-drop="${drop}">Vứt</button>` : ''}</div>`;
     const gun = (slot: 'p1' | 'p2' | 'pistol', label: string) => {
       const s = me[slot];
-      return cell(label, s ? `${esc(WEAPONS[s.w].name)} · ${s.mag}/${WEAPONS[s.w].magSize}` : 'Trống', s ? slot : undefined);
+      const icon: IconId = s ? s.w : slot === 'pistol' ? 'pistol' : 'rifle';
+      return cell(icon, !!s, label, s ? `${esc(WEAPONS[s.w].name)} · ${s.mag}/${WEAPONS[s.w].magSize}` : 'Trống', s ? slot : undefined);
     };
     box.innerHTML = `
       <div class="overlay"><div class="card inventory-panel">
-        <div class="row between"><h2>🎒 Túi đồ</h2><button class="btn small" data-close>Đóng (Tab)</button></div>
+        <div class="row between"><h2 class="with-icon">${iconHtml(me.bag ? (`bag${me.bag}` as IconId) : 'bag1', 34)} Túi đồ</h2><button class="btn small" data-close>Đóng (Tab)</button></div>
         <div class="inv-grid">
           ${gun('p1', 'Súng chính 1')}${gun('p2', 'Súng chính 2')}${gun('pistol', 'Súng lục')}
-          ${cell('Cận chiến', esc(WEAPONS[me.melee].name), me.melee !== 'fists' ? 'melee' : undefined)}
-          ${cell('Giáp', me.armor ? `Cấp ${me.armor} · độ bền ${me.armorDur}` : 'Không có', me.armor ? 'armor' : undefined)}
-          ${cell('Túi đồ', me.bag ? `Cấp ${me.bag}` : 'Không có', me.bag ? 'bag' : undefined)}
-          ${cell('Túi cứu thương', `${me.med} / ${cap.medkit}`, me.med ? 'medkit' : undefined)}
-          ${cell('Lựu đạn', `${me.gren} / ${cap.grenade}`, me.gren ? 'grenade' : undefined)}
-          ${cell('Bom khói', `${me.smoke} / ${cap.smoke}`, me.smoke ? 'smoke' : undefined)}
-          ${AMMO_TYPES.map((t) => cell(AMMO_NAMES[t], `${me.ammo[t]} / ${cap.ammo[t]}`, me.ammo[t] ? `ammo_${t}` : undefined)).join('')}
+          ${cell(me.melee, true, 'Cận chiến', esc(WEAPONS[me.melee].name), me.melee !== 'fists' ? 'melee' : undefined)}
+          ${cell(`armor${me.armor || 1}` as IconId, me.armor > 0, 'Giáp', me.armor ? `Cấp ${me.armor} · độ bền ${me.armorDur}` : 'Không có', me.armor ? 'armor' : undefined)}
+          ${cell(`bag${me.bag || 1}` as IconId, me.bag > 0, 'Túi đồ', me.bag ? `Cấp ${me.bag}` : 'Không có', me.bag ? 'bag' : undefined)}
+          ${cell('medkit', me.med > 0, 'Túi cứu thương', `${me.med} / ${cap.medkit}`, me.med ? 'medkit' : undefined)}
+          ${cell('grenade', me.gren > 0, 'Lựu đạn', `${me.gren} / ${cap.grenade}`, me.gren ? 'grenade' : undefined)}
+          ${cell('smoke', me.smoke > 0, 'Bom khói', `${me.smoke} / ${cap.smoke}`, me.smoke ? 'smoke' : undefined)}
+          ${AMMO_TYPES.map((t) => cell(`ammo_${t}`, me.ammo[t] > 0, AMMO_NAMES[t], `${me.ammo[t]} / ${cap.ammo[t]}`, me.ammo[t] ? `ammo_${t}` : undefined)).join('')}
         </div>
         <h3>Ống nhắm</h3>
         <div class="row">${me.scopes.map((s) => `<button class="btn small ${s === me.scope ? 'primary' : ''}" data-scope="${s}">x${s}</button>${s > 1 ? `<button class="btn small" data-drop="scope${s}" title="Vứt">✕</button>` : ''}`).join('')}</div>
