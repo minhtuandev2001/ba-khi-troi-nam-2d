@@ -21,7 +21,7 @@ export function html(markup: string): HTMLElement {
 
 export function toast(text: string, kind: 'info' | 'error' = 'info', ms = 3000) {
   const box = document.getElementById('toasts')!;
-  const el = html(`<div class="toast ${kind}">${esc(text)}</div>`);
+  const el = html(`<div class="toast ${kind}" style="--life:${ms}ms">${esc(text)}</div>`);
   box.appendChild(el);
   setTimeout(() => el.remove(), ms);
 }

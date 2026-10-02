@@ -35,7 +35,7 @@ import {
   type ZoneNet,
 } from '../shared';
 import { settings, useTouchControls } from '../settings';
-import { esc, toast } from '../ui/dom';
+import { esc } from '../ui/dom';
 import { sfx, stopAmbient, unlockAudio } from './audio';
 import { GameScene } from './GameScene';
 import { Hud } from './Hud';
@@ -144,8 +144,9 @@ export class GameSession {
     this.socket.on('match:dead', this.onDead);
     this.socket.on('match:end', this.onEnd);
     this.socket.on('match:left', this.onLeft);
-    this.socket.on('disconnect', this.onDisconnect);
     this.bindInput();
+    this.guardNavigation();
+    this.keepScreenAwake();
 
     this.pingTimer = window.setInterval(() => {
       const t = performance.now();
@@ -157,6 +158,73 @@ export class GameSession {
 
   get matchId(): string {
     return this.start.matchId;
+  }
+
+  get isEnded(): boolean {
+    return this.ended;
+  }
+
+  /** The server re-sent match:start after a reconnect: keep the scene, drop state the server will resend. */
+  resync(msg: MatchStartMsg) {
+    msg.doorsOpen.forEach((open, i) => {
+      if (this.world.doorOpen[i] === open) return;
+      this.world.doorOpen[i] = open;
+      this.scene?.setDoor(i, open);
+    });
+    msg.chestsAlive.forEach((alive, i) => {
+      if (alive || !this.world.chestAlive[i]) return;
+      this.world.chestAlive[i] = false;
+      this.scene?.removeChest(i);
+    });
+    for (const id of this.loot.keys()) this.scene?.removeLoot(id);
+    this.loot.clear();
+    this.pendingLoot = { add: [], del: [] };
+    this.pendingEvents = [];
+    this.buffer = [];
+    this.serverOffset = null;
+    this.seq = 0;
+    this.pending = [];
+    this.predReady = false;
+  }
+
+  /** Android back / swipe-back opens the pause menu instead of leaving the page; reload asks first. */
+  private guardNavigation() {
+    const marker = { br2dMatch: this.matchId };
+    history.pushState(marker, '');
+    this.listen(window, 'popstate', () => {
+      if (this.destroyed) return;
+      history.pushState(marker, '');
+      if (this.hud.current === 'none') this.hud.toggle('pause');
+      else this.hud.closeOverlay();
+    });
+    this.listen(window, 'beforeunload', (e) => {
+      if (this.ended || !this.me?.alive || this.spectating) return;
+      e.preventDefault();
+      e.returnValue = '';
+    });
+    this.cleanups.push(() => {
+      if ((history.state as { br2dMatch?: string } | null)?.br2dMatch === this.matchId) history.replaceState(null, '');
+    });
+  }
+
+  private keepScreenAwake() {
+    type Sentinel = { release(): Promise<void> };
+    const wl = (navigator as Navigator & { wakeLock?: { request(type: 'screen'): Promise<Sentinel> } }).wakeLock;
+    if (!wl) return;
+    let lock: Sentinel | null = null;
+    const request = () => {
+      if (this.destroyed || document.visibilityState !== 'visible') return;
+      wl.request('screen').then((l) => {
+        if (this.destroyed) void l.release();
+        else lock = l;
+      }).catch(() => undefined);
+    };
+    request();
+    document.addEventListener('visibilitychange', request);
+    this.cleanups.push(() => {
+      document.removeEventListener('visibilitychange', request);
+      void lock?.release().catch(() => undefined);
+    });
   }
 
   get viewPid(): number {
@@ -255,7 +323,7 @@ export class GameSession {
   private onTouchButton(b: TouchButton) {
     unlockAudio();
     const mode = this.touchMode();
-    if (mode === 'off' || (mode === 'view' && b !== 'map' && b !== 'pause')) return;
+    if (mode === 'off' || (mode === 'view' && b !== 'map' && b !== 'pause') || (mode === 'move' && b !== 'inventory')) return;
     switch (b) {
       case 'reload': return this.action({ t: 'reload' });
       case 'interact': return this.action({ t: 'interact' });
@@ -284,7 +352,8 @@ export class GameSession {
   }
 
   private action(msg: ActionMsg) {
-    if (this.ended) return;
+    // socket.io would queue it and replay it after reconnecting, long after the player meant it
+    if (this.ended || !this.socket.connected) return;
     this.socket.emit('action', msg);
   }
 
@@ -295,9 +364,11 @@ export class GameSession {
   }
 
   private touchMode(): TouchMode {
-    if (this.ended || this.destroyed || this.hud.current !== 'none') return 'off';
-    if (!this.me || !this.me.alive || this.spectating || this.hud.isDead) return 'view';
-    return 'play';
+    if (this.ended || this.destroyed) return 'off';
+    const playing = !!this.me && this.me.alive && !this.spectating && !this.hud.isDead;
+    if (playing && this.hud.current === 'inventory') return 'move';
+    if (this.hud.current !== 'none') return 'off';
+    return playing ? 'play' : 'view';
   }
 
   private syncTouchMode() {
@@ -319,8 +390,10 @@ export class GameSession {
 
   private sendInput() {
     const me = this.me;
-    if (!me || !me.alive || this.spectating || this.ended || !this.predReady) return;
-    const blocked = this.hud.current !== 'none' || this.hud.isDead || (this.touch !== null && this.touch.mode !== 'play');
+    if (!me || !me.alive || this.spectating || this.ended || !this.predReady || !this.socket.connected) return;
+    // with the touch inventory drawer open the player may still walk; TouchControls itself suppresses aiming and firing
+    const moveOnly = this.touch !== null && this.touch.mode === 'move';
+    const blocked = !moveOnly && (this.hud.current !== 'none' || this.hud.isDead || (this.touch !== null && this.touch.mode !== 'play'));
     let mx = 0;
     let my = 0;
     let fire = false;
@@ -515,7 +588,8 @@ export class GameSession {
   }
 
   private onDead = (msg: DeathMsg) => {
-    if (this.ended) return;
+    // the server repeats match:dead after a reconnect; don't pull a spectator back to the death screen
+    if (this.ended || this.hud.isDead) return;
     const killerAlive = msg.killer >= 0 && msg.killer !== this.you;
     this.hud.showDeath(msg, killerAlive);
     this.syncTouchMode();
@@ -529,11 +603,6 @@ export class GameSession {
   };
 
   private onLeft = () => this.exit();
-
-  private onDisconnect = () => {
-    if (this.ended) return;
-    toast('Mất kết nối tới máy chủ, đang kết nối lại…', 'error', 4000);
-  };
 
   private leave() {
     if (this.ended) return this.exit();
@@ -636,7 +705,6 @@ export class GameSession {
     this.socket.off('match:dead', this.onDead);
     this.socket.off('match:end', this.onEnd);
     this.socket.off('match:left', this.onLeft);
-    this.socket.off('disconnect', this.onDisconnect);
     for (const fn of this.cleanups) fn();
     this.touch?.destroy();
     this.hud.destroy();

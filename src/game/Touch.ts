@@ -16,12 +16,18 @@ export type TouchButton = 'reload' | 'interact' | 'heal' | 'grenade' | 'smoke' |
 
 /**
  * play: everything active.
+ * move: the inventory drawer is open; only the movement stick and the inventory toggle remain.
  * view: dead or spectating; only pause and map remain.
  * off:  a menu or result screen is open; the whole layer is hidden so it never steals taps.
  */
-export type TouchMode = 'play' | 'view' | 'off';
+export type TouchMode = 'play' | 'move' | 'view' | 'off';
 
-const VIEW_BUTTONS: ReadonlySet<TouchButton> = new Set(['pause', 'map']);
+const MODE_BUTTONS: Record<TouchMode, ReadonlySet<TouchButton> | null> = {
+  play: null,
+  move: new Set(['inventory']),
+  view: new Set(['pause', 'map']),
+  off: new Set(),
+};
 
 /** On-screen joysticks: left moves, right aims and fires (release throws grenades). */
 export class TouchControls {
@@ -65,7 +71,8 @@ export class TouchControls {
     ];
     for (const [id, label, style, px] of defs) {
       const btn = document.createElement('div');
-      btn.className = VIEW_BUTTONS.has(id) ? 'tbtn' : 'tbtn play-only';
+      btn.className = 'tbtn';
+      for (const mode of ['move', 'view'] as const) if (MODE_BUTTONS[mode]!.has(id)) btn.classList.add(`in-${mode}`);
       btn.innerHTML = label;
       btn.setAttribute('style', `${style};width:${px}px;height:${px}px`);
       btn.addEventListener('pointerdown', (e) => {
@@ -93,32 +100,23 @@ export class TouchControls {
     const stick: Stick = { zone, base, knob, pointerId: null, ox: 0, oy: 0, x: 0, y: 0 };
 
     zone.addEventListener('pointerdown', (e) => {
-      if (stick.pointerId !== null || this.modeValue !== 'play') return;
+      if (stick.pointerId !== null || !this.stickEnabled(side)) return;
       e.preventDefault();
       zone.setPointerCapture(e.pointerId);
       const rect = zone.getBoundingClientRect();
       stick.pointerId = e.pointerId;
-      stick.ox = e.clientX - rect.left;
-      stick.oy = e.clientY - rect.top;
-      this.place(stick, stick.ox, stick.oy, 0, 0);
+      // the whole ring must fit inside its own half, so a touch near the centre line can't spill across
+      const clamp = (v: number, max: number) => Math.min(Math.max(v, this.radius), Math.max(this.radius, max - this.radius));
+      stick.ox = clamp(e.clientX - rect.left, rect.width);
+      stick.oy = clamp(e.clientY - rect.top, rect.height);
       base.classList.remove('hidden');
       knob.classList.remove('hidden');
       if (side === 'right') this.aim.active = true;
+      this.track(stick, side, e);
     });
     zone.addEventListener('pointermove', (e) => {
-      if (e.pointerId !== stick.pointerId || this.modeValue !== 'play') return;
-      const rect = zone.getBoundingClientRect();
-      let dx = e.clientX - rect.left - stick.ox;
-      let dy = e.clientY - rect.top - stick.oy;
-      const len = Math.hypot(dx, dy);
-      if (len > this.radius) {
-        dx = (dx / len) * this.radius;
-        dy = (dy / len) * this.radius;
-      }
-      stick.x = dx / this.radius;
-      stick.y = dy / this.radius;
-      this.place(stick, stick.ox, stick.oy, dx, dy);
-      this.sync(side, stick);
+      if (e.pointerId !== stick.pointerId || !this.stickEnabled(side)) return;
+      this.track(stick, side, e);
     });
     const end = (e: PointerEvent) => {
       if (e.pointerId !== stick.pointerId) return;
@@ -145,17 +143,23 @@ export class TouchControls {
     if (mode === this.modeValue) return;
     this.modeValue = mode;
     this.root.dataset.mode = mode;
-    if (mode !== 'play') this.reset();
+    // keep a held movement stick when only aiming is suspended, so the player can keep walking
+    if (mode === 'move') this.reset([this.right]);
+    else if (mode !== 'play') this.reset([this.left, this.right]);
+  }
+
+  private stickEnabled(side: 'left' | 'right'): boolean {
+    return this.modeValue === 'play' || (this.modeValue === 'move' && side === 'left');
   }
 
   private allows(b: TouchButton): boolean {
-    if (this.modeValue === 'off') return false;
-    return this.modeValue === 'play' || VIEW_BUTTONS.has(b);
+    const only = MODE_BUTTONS[this.modeValue];
+    return only === null || only.has(b);
   }
 
-  /** Drops any held stick so nothing keeps moving, firing or throwing once play is interrupted. */
-  private reset() {
-    for (const s of [this.left, this.right]) {
+  /** Drops held sticks so nothing keeps moving, firing or throwing once play is interrupted. */
+  private reset(sticks: Stick[] = [this.left, this.right]) {
+    for (const s of sticks) {
       if (s.pointerId !== null) {
         const id = s.pointerId;
         s.pointerId = null;
@@ -166,13 +170,31 @@ export class TouchControls {
       s.base.classList.add('hidden');
       s.knob.classList.add('hidden');
     }
-    this.move.x = 0;
-    this.move.y = 0;
+    if (sticks.includes(this.left)) {
+      this.move.x = 0;
+      this.move.y = 0;
+    }
+    if (!sticks.includes(this.right)) return;
     this.aim.x = 0;
     this.aim.y = 0;
     this.aim.active = false;
     this.releasePulse = false;
     this.lastAimMagnitude = 0;
+  }
+
+  private track(stick: Stick, side: 'left' | 'right', e: PointerEvent) {
+    const rect = stick.zone.getBoundingClientRect();
+    let dx = e.clientX - rect.left - stick.ox;
+    let dy = e.clientY - rect.top - stick.oy;
+    const len = Math.hypot(dx, dy);
+    if (len > this.radius) {
+      dx = (dx / len) * this.radius;
+      dy = (dy / len) * this.radius;
+    }
+    stick.x = dx / this.radius;
+    stick.y = dy / this.radius;
+    this.place(stick, stick.ox, stick.oy, dx, dy);
+    this.sync(side, stick);
   }
 
   private place(s: Stick, ox: number, oy: number, dx: number, dy: number) {

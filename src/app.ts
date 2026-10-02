@@ -23,6 +23,7 @@ import { unlockAudio } from './game/audio';
 import { GameSession } from './game/session';
 import { connectSocket, disconnectSocket } from './net';
 import { $, esc, formatDate, formatDuration, toast } from './ui/dom';
+import { NetStatus, SERVER_WAKING_TEXT } from './ui/netStatus';
 import { bindSettings, guidePanel, itemsPanel, keysPanel, settingsPanel } from './ui/panels';
 
 type Screen = 'loading' | 'auth' | 'lobby' | 'queue' | 'room' | 'profile' | 'history' | 'panel' | 'game' | 'message';
@@ -39,6 +40,9 @@ export class App {
   private queueSince = 0;
   private queueTimer = 0;
   private room: RoomStateMsg | null = null;
+  private readonly net = new NetStatus();
+  /** Set while a start/join request is in flight so repeated taps don't send it twice. */
+  private pendingUntil = 0;
 
   async init() {
     const params = new URLSearchParams(location.search);
@@ -46,8 +50,15 @@ export class App {
     if (invite && isUuid(invite)) sessionStorage.setItem(PENDING_ROOM_KEY, invite);
     if (invite) history.replaceState(null, '', location.pathname);
 
-    this.render('loading', `<div class="screen"><div class="logo">SINH TỒN 2D</div><div class="spinner"></div></div>`);
-    if (!getToken()) return this.showAuth('login');
+    this.render('loading', `<div class="screen"><div class="logo">SINH TỒN 2D</div><div class="spinner"></div><p class="muted center" id="boot-hint"></p></div>`);
+    const hintTimer = window.setTimeout(() => {
+      const hint = this.ui.querySelector('#boot-hint');
+      if (hint) hint.textContent = SERVER_WAKING_TEXT;
+    }, 4000);
+    if (!getToken()) {
+      clearTimeout(hintTimer);
+      return this.showAuth('login');
+    }
     try {
       const { user } = await api.me();
       this.onLoggedIn(user);
@@ -58,7 +69,60 @@ export class App {
       } else {
         this.showMessage('Không kết nối được máy chủ', (err as Error).message, () => this.init());
       }
+    } finally {
+      clearTimeout(hintTimer);
     }
+  }
+
+  /** Emits a lobby request only when connected; `once` requests are also debounced until the server answers. */
+  private send(event: string, arg?: unknown, once = false): boolean {
+    const s = this.socket;
+    if (!s?.connected) {
+      toast('Chưa kết nối được máy chủ, vui lòng đợi giây lát…', 'error');
+      return false;
+    }
+    if (once) {
+      if (Date.now() < this.pendingUntil) return false;
+      this.pendingUntil = Date.now() + 5000;
+      document.body.classList.add('net-pending');
+    }
+    if (arg === undefined) s.emit(event);
+    else s.emit(event, arg);
+    return true;
+  }
+
+  private clearPending() {
+    this.pendingUntil = 0;
+    document.body.classList.remove('net-pending');
+  }
+
+  private async copyText(text: string, label: string) {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.setAttribute('readonly', '');
+        area.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+        document.body.appendChild(area);
+        area.select();
+        const ok = document.execCommand('copy');
+        area.remove();
+        if (!ok) throw new Error('copy failed');
+      }
+      toast(`Đã sao chép ${label}`);
+    } catch {
+      toast('Trình duyệt không cho phép sao chép, hãy chạm giữ vào mã để chép thủ công.', 'error', 4000);
+    }
+  }
+
+  private loadFailed(title: string, err: unknown, retry: () => void) {
+    this.render(this.screen, `<div class="screen"><div class="container">${this.header()}
+      <div class="card center"><h2>${esc(title)}</h2><p class="muted">${esc((err as Error).message)}</p>
+      <button class="btn primary" id="retry">Thử lại</button></div></div></div>`);
+    this.bindNav();
+    $('#retry').addEventListener('click', retry);
   }
 
   private render(screen: Screen, markup: string) {
@@ -173,7 +237,12 @@ export class App {
         return;
       }
       const btn = form.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+      const label = btn.textContent;
       btn.disabled = true;
+      btn.textContent = tab === 'login' ? 'Đang đăng nhập…' : 'Đang tạo tài khoản…';
+      const slow = window.setTimeout(() => {
+        if (!errorBox.textContent) errorBox.innerHTML = `<span class="muted">${esc(SERVER_WAKING_TEXT)}</span>`;
+      }, 4000);
       try {
         const res = tab === 'login' ? await api.login(username, password) : await api.register(username, password, avatar);
         setToken(res.token);
@@ -181,6 +250,9 @@ export class App {
       } catch (err) {
         errorBox.textContent = (err as Error).message;
         btn.disabled = false;
+        btn.textContent = label;
+      } finally {
+        clearTimeout(slow);
       }
     });
   }
@@ -195,9 +267,17 @@ export class App {
     setToken(null);
     this.session?.destroy();
     this.session = null;
+    if (this.socket?.connected) {
+      if (this.room) this.socket.emit('room:leave');
+      if (this.queue?.inQueue) this.socket.emit('queue:leave');
+    }
     disconnectSocket();
     this.socket = null;
+    this.net.set('hidden');
     this.user = null;
+    this.room = null;
+    this.queue = null;
+    this.clearPending();
     this.showAuth('login');
   }
 
@@ -207,11 +287,31 @@ export class App {
     if (this.socket) return;
     const s = connectSocket();
     this.socket = s;
+    let everConnected = false;
+    let lostAt = 0;
+    const slowTimer = window.setTimeout(() => {
+      if (!s.connected) this.net.set('connecting', SERVER_WAKING_TEXT);
+    }, 1500);
+    s.on('connect', () => {
+      clearTimeout(slowTimer);
+      this.net.set('hidden');
+      if (everConnected && lostAt) toast('Đã kết nối lại máy chủ');
+      everConnected = true;
+      lostAt = 0;
+    });
+    s.on('disconnect', (reason) => {
+      if (reason === 'io client disconnect') return;
+      this.clearPending();
+      lostAt = Date.now();
+      this.net.set('lost');
+    });
     s.on('connect_error', (err) => {
       if (err.message === 'unauthorized') {
         toast('Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.', 'error');
         this.logout();
+        return;
       }
+      this.net.set(everConnected ? 'lost' : 'connecting', everConnected ? undefined : SERVER_WAKING_TEXT);
     });
     s.on('lobby:ready', () => {
       const pending = sessionStorage.getItem(PENDING_ROOM_KEY);
@@ -219,31 +319,52 @@ export class App {
         sessionStorage.removeItem(PENDING_ROOM_KEY);
         s.emit('room:join', pending);
       }
-      if (this.screen === 'game' && !this.session) this.showLobby();
+      // the server only says "lobby" when we are no longer in a match, so a live session means it ended while we were away
+      if (this.session && !this.session.isEnded) {
+        this.session.destroy();
+        this.session = null;
+        toast('Trận đấu đã kết thúc trong lúc bạn mất kết nối.', 'error', 5000);
+        this.showLobby();
+        this.refreshUser();
+      } else if (this.screen === 'game' && !this.session) {
+        this.showLobby();
+      }
     });
     s.on('queue:status', (msg: QueueStatusMsg) => {
+      this.clearPending();
       if (msg.inQueue) {
         if (!this.queue?.inQueue) this.queueSince = Date.now() - msg.waitedMs;
         this.queue = msg;
-        if (this.screen !== 'game') this.showQueue();
+        if (this.screen === 'queue' || this.screen === 'lobby') this.showQueue();
       } else {
         this.queue = null;
         if (this.screen === 'queue') this.showLobby();
       }
     });
     s.on('room:state', (msg: RoomStateMsg) => {
+      this.clearPending();
       this.room = msg;
-      if (this.screen !== 'game') this.showRoom();
+      if (this.screen === 'room' || this.screen === 'lobby') this.showRoom();
     });
-    s.on('room:closed', () => {
+    s.on('room:closed', (info?: { reason?: string }) => {
+      this.clearPending();
+      const had = this.room !== null;
       this.room = null;
+      if (had && info?.reason === 'gone') toast('Phòng chờ đã đóng trong lúc bạn mất kết nối.', 'error', 4000);
       if (this.screen === 'room') this.showLobby();
     });
-    s.on('error:msg', (m: { text: string }) => toast(m.text, 'error'));
-    s.on('match:start', (msg: MatchStartMsg) => this.startGame(msg));
+    s.on('error:msg', (m: { text: string }) => {
+      this.clearPending();
+      toast(m.text, 'error');
+    });
+    s.on('match:start', (msg: MatchStartMsg) => {
+      this.clearPending();
+      this.startGame(msg);
+    });
     s.on('session:replaced', () => {
       disconnectSocket();
       this.socket = null;
+      this.net.set('hidden');
       this.session?.destroy();
       this.session = null;
       this.showMessage('Tài khoản đang được dùng ở nơi khác', 'Bạn vừa đăng nhập trên một thiết bị hoặc tab khác.', () => {
@@ -254,6 +375,10 @@ export class App {
   }
 
   private startGame(msg: MatchStartMsg) {
+    if (this.session && this.session.matchId === msg.matchId && !this.session.isEnded) {
+      this.session.resync(msg);
+      return;
+    }
     this.session?.destroy();
     this.queue = null;
     this.room = null;
@@ -262,30 +387,34 @@ export class App {
     this.session = new GameSession(msg, this.socket!, () => {
       this.session = null;
       this.showLobby();
-      api.me().then(({ user }) => {
-        this.user = user;
-        if (this.screen === 'lobby') this.showLobby();
-      }).catch(() => undefined);
+      this.refreshUser();
     });
+  }
+
+  private refreshUser() {
+    api.me().then(({ user }) => {
+      this.user = user;
+      if (this.screen === 'lobby') this.showLobby();
+    }).catch(() => undefined);
   }
 
   // ---------------------------------------------------------------- lobby
 
-  private header(): string {
+  private header(inLobby = false): string {
     const u = this.user!;
     const level = levelFromXp(u.xp);
     const from = xpForLevel(level);
     const to = xpForLevel(level + 1);
     const pct = ((u.xp - from) / (to - from)) * 100;
     return `<div class="topbar">
-      <div class="player-chip">
+      <div class="player-chip" data-nav="profile" title="Hồ sơ & thống kê">
         <span class="avatar">${esc(u.avatar)}</span>
         <div><div class="name">${esc(u.username)}</div>
           <div class="muted" style="font-size:12px">Cấp ${level} · ${u.xp - from}/${to - from} XP</div>
           <div class="xpbar"><div style="width:${pct}%"></div></div></div>
       </div>
-      <div class="row">
-        <button class="btn small" data-nav="lobby">🏠 Sảnh</button>
+      <div class="row topbar-actions">
+        ${inLobby ? '' : '<button class="btn small" data-nav="lobby">🏠 Sảnh</button><button class="btn small" data-nav="settings" title="Cài đặt" aria-label="Cài đặt">⚙️</button>'}
         <button class="btn small" data-nav="logout">Đăng xuất</button>
       </div>
     </div>`;
@@ -314,51 +443,56 @@ export class App {
     if (this.queue?.inQueue) return this.showQueue();
     if (this.room) return this.showRoom();
     this.render('lobby', `
-      <div class="screen"><div class="container">
-        ${this.header()}
-        <div class="logo">SINH TỒN 2D</div>
-        <div class="subtitle">Chọn chế độ chơi</div>
-        <div class="grid cols-3">
-          <div class="card mode-card" data-mode="pvp">
-            <div class="icon">⚔️</div><h3>${MODE_NAMES.pvp}</h3>
-            <p class="muted">Ghép trận tự động. Trận bắt đầu khi đủ ${MAX_PLAYERS} người chơi thật.</p>
+      <div class="screen"><div class="container lobby">
+        ${this.header(true)}
+        <div class="lobby-main">
+          <div class="lobby-hero">
+            <div class="logo">SINH TỒN 2D</div>
+            <div class="subtitle">Nhặt đồ, né bo, trụ lại đến cuối cùng</div>
           </div>
-          <div class="card mode-card" data-mode="bots">
-            <div class="icon">🤖</div><h3>${MODE_NAMES.bots}</h3>
-            <p class="muted">Vào trận ngay với ${MAX_PLAYERS - 1} bot. Phù hợp để luyện tập.</p>
-          </div>
-          <div class="card mode-card" data-mode="private">
-            <div class="icon">👥</div><h3>${MODE_NAMES.private}</h3>
-            <p class="muted">Tạo phòng và mời bạn bè bằng mã phòng hoặc đường link.</p>
-            <button class="btn primary" id="create-room">Tạo phòng</button>
-            <div class="row" style="flex-wrap:nowrap">
-              <input class="input" id="room-code" placeholder="Nhập mã phòng hoặc link mời" />
-              <button class="btn" id="join-room">Vào</button>
+          <div class="modes">
+            <div class="card mode-card" data-mode="pvp">
+              <div class="icon">⚔️</div><h3>${MODE_NAMES.pvp}</h3>
+              <p>Ghép trận tự động. Trận bắt đầu khi đủ ${MAX_PLAYERS} người chơi thật.</p>
+              <span class="btn primary mode-cta">Tìm trận</span>
+            </div>
+            <div class="card mode-card" data-mode="bots">
+              <div class="icon">🤖</div><h3>${MODE_NAMES.bots}</h3>
+              <p>Vào trận ngay với ${MAX_PLAYERS - 1} bot. Phù hợp để luyện tập.</p>
+              <span class="btn primary mode-cta">Chơi ngay</span>
+            </div>
+            <div class="card mode-card" data-mode="private">
+              <div class="icon">👥</div><h3>${MODE_NAMES.private}</h3>
+              <p>Tạo phòng và mời bạn bè bằng mã phòng hoặc đường link.</p>
+              <button class="btn primary mode-cta" id="create-room">Tạo phòng</button>
+              <div class="join-row">
+                <input class="input" id="room-code" placeholder="Mã phòng / link mời" />
+                <button class="btn" id="join-room">Vào</button>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="spacer"></div>
-        <div class="grid cols-3">
-          <button class="btn big" data-nav="profile">👤 Hồ sơ & thống kê</button>
-          <button class="btn big" data-nav="history">📜 Lịch sử trận đấu</button>
-          <button class="btn big" data-nav="guide">📖 Hướng dẫn chơi</button>
-          <button class="btn big" data-nav="items">🎒 Danh sách vật phẩm</button>
-          <button class="btn big" data-nav="keys">⌨️ Phím tắt</button>
-          <button class="btn big" data-nav="settings">⚙️ Cài đặt</button>
+          <nav class="lobby-menu">
+            <button class="menu-tile" data-nav="profile"><span>👤</span>Hồ sơ</button>
+            <button class="menu-tile" data-nav="history"><span>📜</span>Lịch sử</button>
+            <button class="menu-tile" data-nav="guide"><span>📖</span>Hướng dẫn</button>
+            <button class="menu-tile" data-nav="items"><span>🎒</span>Vật phẩm</button>
+            <button class="menu-tile" data-nav="keys"><span>⌨️</span>Phím tắt</button>
+            <button class="menu-tile" data-nav="settings"><span>⚙️</span>Cài đặt</button>
+          </nav>
         </div>
       </div></div>`);
     this.bindNav();
     this.ui.querySelector('[data-mode="pvp"]')!.addEventListener('click', () => {
       unlockAudio();
-      this.socket?.emit('queue:join');
+      this.send('queue:join', undefined, true);
     });
     this.ui.querySelector('[data-mode="bots"]')!.addEventListener('click', () => {
       unlockAudio();
-      this.socket?.emit('bot:start');
+      this.send('bot:start', undefined, true);
     });
     $('#create-room').addEventListener('click', (e) => {
       e.stopPropagation();
-      this.socket?.emit('room:create');
+      this.send('room:create', undefined, true);
     });
     const joinInput = $('#room-code') as HTMLInputElement;
     joinInput.addEventListener('click', (e) => e.stopPropagation());
@@ -367,7 +501,7 @@ export class App {
       const raw = joinInput.value.trim();
       const match = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(raw);
       if (!match || !isUuid(match[0])) return toast('Mã phòng không hợp lệ.', 'error');
-      this.socket?.emit('room:join', match[0].toLowerCase());
+      this.send('room:join', match[0].toLowerCase(), true);
     };
     $('#join-room').addEventListener('click', join);
     joinInput.addEventListener('keydown', (e) => e.key === 'Enter' && join(e));
@@ -395,10 +529,10 @@ export class App {
           </div></div>
         </div></div>`);
       this.bindNav();
-      $('#q-cancel').addEventListener('click', () => this.socket?.emit('queue:leave'));
+      $('#q-cancel').addEventListener('click', () => this.send('queue:leave'));
       $('#q-bots').addEventListener('click', () => {
-        this.socket?.emit('queue:leave');
-        setTimeout(() => this.socket?.emit('bot:start'), 200);
+        if (!this.send('queue:leave')) return;
+        this.socket?.emit('bot:start');
       });
       window.clearInterval(this.queueTimer);
       this.queueTimer = window.setInterval(() => {
@@ -469,22 +603,21 @@ export class App {
         </div>
       </div></div>`);
     this.bindNav();
-    const copy = (text: string, label: string) =>
-      navigator.clipboard?.writeText(text).then(() => toast(`Đã sao chép ${label}`), () => toast('Trình duyệt không cho phép sao chép, hãy chép thủ công.', 'error'));
-    $('#copy-code').addEventListener('click', () => copy(room.id, 'mã phòng'));
-    $('#copy-link').addEventListener('click', () => copy(link, 'link mời'));
-    $('#leave-room').addEventListener('click', () => this.socket?.emit('room:leave'));
+    $('#copy-code').addEventListener('click', () => void this.copyText(room.id, 'mã phòng'));
+    $('#copy-link').addEventListener('click', () => void this.copyText(link, 'link mời'));
+    $('#leave-room').addEventListener('click', () => this.send('room:leave'));
     if (isHost) {
-      $('#add-bot').addEventListener('click', () => this.socket?.emit('room:addBot'));
+      $('#add-bot').addEventListener('click', () => this.send('room:addBot'));
       $('#fill-bots').addEventListener('click', () => {
-        for (let i = total; i < room.max; i++) this.socket?.emit('room:addBot');
+        if (!this.send('room:addBot')) return;
+        for (let i = total + 1; i < room.max; i++) this.socket?.emit('room:addBot');
       });
       $('#start-room').addEventListener('click', () => {
         unlockAudio();
-        this.socket?.emit('room:start');
+        this.send('room:start', undefined, true);
       });
       this.ui.querySelectorAll<HTMLElement>('[data-remove]').forEach((b) =>
-        b.addEventListener('click', () => this.socket?.emit('room:removeBot', b.dataset.remove)),
+        b.addEventListener('click', () => this.send('room:removeBot', b.dataset.remove)),
       );
     }
   }
@@ -550,7 +683,7 @@ export class App {
         }),
       );
     } catch (err) {
-      toast((err as Error).message, 'error');
+      if (this.screen === 'profile') this.loadFailed('Không tải được hồ sơ', err, () => this.showProfile());
     }
   }
 
@@ -589,7 +722,7 @@ export class App {
       $('#prev').addEventListener('click', () => this.showHistory(page - 1));
       $('#next').addEventListener('click', () => this.showHistory(page + 1));
     } catch (err) {
-      toast((err as Error).message, 'error');
+      if (this.screen === 'history') this.loadFailed('Không tải được lịch sử trận đấu', err, () => this.showHistory(page));
     }
   }
 

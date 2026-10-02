@@ -47,6 +47,15 @@ export class Hud {
   private centerTimer = 0;
   private deathInfo: DeathMsg | null = null;
   private dead = false;
+  private pressing = false;
+  private readonly onRelease = () => {
+    if (!this.pressing) return;
+    this.pressing = false;
+    // let the click land on the button that was pressed before swapping the markup
+    setTimeout(() => {
+      if (this.overlay === 'inventory') this.renderInventoryPanel(false);
+    }, 0);
+  };
 
   constructor(
     private readonly root: HTMLElement,
@@ -57,7 +66,7 @@ export class Hud {
   ) {
     root.innerHTML = `
       <div class="hud-top-left"><div class="hud-pill" id="h-alive">👤 0</div><div class="hud-pill" id="h-kills">💀 0</div></div>
-      <div class="hud-zone"><div class="hud-pill" id="h-zone">Đang tải…</div></div>
+      <div class="hud-zone" id="h-zone">Đang tải…</div>
       <button class="btn small pause-btn" id="h-pause" title="Tạm dừng (Esc)">⏸</button>
       <canvas class="minimap interactive" id="h-minimap" width="170" height="170" title="Bản đồ (M)"></canvas>
       <div class="killfeed" id="h-feed"></div>
@@ -80,6 +89,9 @@ export class Hud {
     this.minimap = this.el.minimap as HTMLCanvasElement;
     this.minimap.addEventListener('click', () => this.toggle('map'));
     this.el.pause.addEventListener('click', () => this.toggle('pause'));
+    this.el.overlay.addEventListener('pointerdown', () => (this.pressing = true));
+    window.addEventListener('pointerup', this.onRelease);
+    window.addEventListener('pointercancel', this.onRelease);
     this.el.slots.addEventListener('click', (e) => {
       const slot = (e.target as HTMLElement).closest<HTMLElement>('[data-slot]')?.dataset.slot as SlotName | undefined;
       if (slot) this.cb.equip(slot);
@@ -266,7 +278,8 @@ export class Hud {
     if (!me) return;
     const box = this.el.overlay;
     const sig = JSON.stringify([me.p1, me.p2, me.pistol, me.melee, me.armor, me.armorDur, me.bag, me.med, me.gren, me.smoke, me.ammo, me.scope, me.scopes]);
-    if (!force && box.dataset.sig === sig) return;
+    // replacing the markup mid-press would swallow the tap, so wait for the release
+    if (!force && (box.dataset.sig === sig || this.pressing)) return;
     box.dataset.sig = sig;
     const cap = BAG_CAPACITY[me.bag];
     const cell = (icon: IconId, has: boolean, title: string, body: string, drop?: string) =>
@@ -279,9 +292,10 @@ export class Hud {
       const icon: IconId = s ? s.w : slot === 'pistol' ? 'pistol' : 'rifle';
       return cell(icon, !!s, label, s ? `${esc(WEAPONS[s.w].name)} · ${s.mag}/${WEAPONS[s.w].magSize}` : 'Trống', s ? slot : undefined);
     };
+    const touch = document.body.classList.contains('touch-ui');
     box.innerHTML = `
-      <div class="overlay"><div class="card inventory-panel">
-        <div class="row between"><h2 class="with-icon">${iconHtml(me.bag ? (`bag${me.bag}` as IconId) : 'bag1', 34)} Túi đồ</h2><button class="btn small" data-close>Đóng (Tab)</button></div>
+      <div class="overlay ${touch ? 'side' : ''}"><div class="card inventory-panel">
+        <div class="row between"><h2 class="with-icon">${iconHtml(me.bag ? (`bag${me.bag}` as IconId) : 'bag1', 34)} Túi đồ</h2><button class="btn small" data-close>${touch ? 'Đóng' : 'Đóng (Tab)'}</button></div>
         <div class="inv-grid">
           ${gun('p1', 'Súng chính 1')}${gun('p2', 'Súng chính 2')}${gun('pistol', 'Súng lục')}
           ${cell(me.melee, true, 'Cận chiến', esc(WEAPONS[me.melee].name), me.melee !== 'fists' ? 'melee' : undefined)}
@@ -410,6 +424,8 @@ export class Hud {
 
   destroy() {
     clearTimeout(this.centerTimer);
+    window.removeEventListener('pointerup', this.onRelease);
+    window.removeEventListener('pointercancel', this.onRelease);
     this.root.innerHTML = '';
     this.root.classList.add('hidden');
   }
