@@ -73,7 +73,7 @@ export function guidePanel(): string {
       <li><b>Thính</b>: cứ 3 phút rơi một lần, luôn rơi bên trong vòng bo tiếp theo và được báo trên bản đồ. Bên trong có súng bắn tỉa, đạn 7.62, giáp 3 và ống nhắm x6 hoặc x8.</li>
     </ul>
     <h3>Ống nhắm</h3>
-    <p>Ống nhắm mở rộng tầm nhìn từ trên xuống. Bấm <span class="kbd">Z</span> để chuyển giữa các ống nhắm bạn có.</p>
+    <p>Ống nhắm mở rộng tầm nhìn từ trên xuống, mặc định là x1. Nhặt ống mới sẽ tự chuyển sang ống đó; mỗi loại chỉ giữ một cái. Bấm vào ống dưới bản đồ nhỏ, trong túi đồ, hoặc bấm <span class="kbd">Z</span> để chuyển giữa các ống bạn có.</p>
     <h3>Vòng bo</h3>
     <p>Vòng bo thu nhỏ qua ${ZONE_PHASES.length} giai đoạn, trận đấu kéo dài khoảng 14–15 phút. Đứng ngoài bo sẽ mất máu liên tục (giáp không giảm sát thương bo). Vòng tròn trắng là vùng an toàn tiếp theo.</p>
     <div class="table-wrap"><table class="list"><thead><tr><th>Giai đoạn</th><th>Chờ</th><th>Thu nhỏ</th><th>Sát thương ngoài bo</th></tr></thead><tbody>${zoneRows}</tbody></table></div>

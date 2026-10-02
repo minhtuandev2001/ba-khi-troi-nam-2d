@@ -1,4 +1,4 @@
-import { MAP_SIZE, type AirdropNet, type GameMap, type ZoneNet } from '../shared';
+import { MAP_SIZE, doorOutward, type AirdropNet, type GameMap, type ZoneNet } from '../shared';
 
 export interface MinimapState {
   x: number;
@@ -45,6 +45,22 @@ export class MapRenderer {
       ctx.strokeStyle = '#10284d';
       ctx.lineWidth = 1.5;
       ctx.strokeRect(h.x * k, h.y * k, h.w * k, h.h * k);
+    }
+    ctx.fillStyle = '#fff3c4';
+    ctx.strokeStyle = '#10284d';
+    ctx.lineWidth = 1;
+    for (const d of map.doors) {
+      const out = doorOutward(map, d);
+      if (!out) continue;
+      // a tab sticking out of the wall stays legible even where the wall is under a pixel wide
+      const len = Math.max(4, Math.max(d.w, d.h) * k);
+      const tab = 3;
+      const cx = (d.x + d.w / 2) * k + out.dx * tab / 2;
+      const cy = (d.y + d.h / 2) * k + out.dy * tab / 2;
+      const w = out.dx ? tab : len;
+      const h = out.dx ? len : tab;
+      ctx.fillRect(cx - w / 2, cy - h / 2, w, h);
+      ctx.strokeRect(cx - w / 2, cy - h / 2, w, h);
     }
     ctx.fillStyle = '#3e4a56';
     for (const w of map.walls) {

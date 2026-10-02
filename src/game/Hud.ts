@@ -4,6 +4,7 @@ import {
   BAG_CAPACITY,
   MAX_HP,
   MODE_NAMES,
+  SCOPE_VIEW_MULTIPLIER,
   WEAPONS,
   weaponName,
   type AirdropNet,
@@ -11,13 +12,14 @@ import {
   type GameMap,
   type MatchEndMsg,
   type RosterEntry,
+  type ScopeLevel,
   type SelfNet,
   type SlotName,
   type ZoneNet,
 } from '../shared';
 import { esc, formatDuration, html } from '../ui/dom';
 import { bindSettings, guidePanel, keysPanel, settingsPanel } from '../ui/panels';
-import { iconHtml, iconSvg, rarityCss, type IconId } from './icons';
+import { iconHtml, iconSvg, rarityCss, scopeGlyph, type IconId } from './icons';
 import { MapRenderer } from './Minimap';
 
 export interface HudCallbacks {
@@ -31,6 +33,17 @@ export interface HudCallbacks {
 type Overlay = 'none' | 'inventory' | 'map' | 'pause' | 'death' | 'end';
 
 const SLOT_KEYS: Record<SlotName, string> = { p1: '1', p2: '2', pistol: 'E', melee: 'V', grenade: '3', smoke: '4' };
+
+function scopeCell(level: number, active: boolean): string {
+  const id = `scope${level}` as IconId;
+  const scoped = level > 1;
+  const bonus = Math.round((SCOPE_VIEW_MULTIPLIER[level as ScopeLevel] - 1) * 100);
+  return `<div class="inv-cell scope-cell ${active ? 'active' : ''}" data-scope="${level}" style="--rarity:${scoped ? rarityCss(id) : '#b8c6d4'}">` +
+    `<div class="inv-ic">${scoped ? iconSvg(id, 40) : scopeGlyph(26)}</div>` +
+    `<div class="inv-text"><b>${scoped ? `Ống nhắm x${level}` : 'Mắt thường x1'}</b>` +
+    `<div class="muted">${scoped ? `Tầm nhìn +${bonus}%` : 'Tầm nhìn mặc định'}</div></div>` +
+    `${scoped ? `<button class="btn small" data-drop="${id}">Vứt</button>` : ''}</div>`;
+}
 
 export class Hud {
   private readonly el: Record<string, HTMLElement> = {};
@@ -47,6 +60,10 @@ export class Hud {
   private centerTimer = 0;
   private deathInfo: DeathMsg | null = null;
   private dead = false;
+  private scopeActive = 0;
+  private scopeIndex = 0;
+  private scopeOwned = '';
+  private readonly scopeChips = new Map<number, HTMLElement>();
   private pressing = false;
   private readonly onRelease = () => {
     if (!this.pressing) return;
@@ -68,8 +85,11 @@ export class Hud {
       <div class="hud-top-left"><div class="hud-pill" id="h-alive">👤 0</div><div class="hud-pill" id="h-kills">💀 0</div></div>
       <div class="hud-zone" id="h-zone">Đang tải…</div>
       <button class="btn small pause-btn" id="h-pause" title="Tạm dừng (Esc)">⏸</button>
-      <canvas class="minimap interactive" id="h-minimap" width="170" height="170" title="Bản đồ (M)"></canvas>
-      <div class="killfeed" id="h-feed"></div>
+      <div class="hud-top-right">
+        <canvas class="minimap interactive" id="h-minimap" width="170" height="170" title="Bản đồ (M)"></canvas>
+        <div class="hud-scope interactive" id="h-scope" title="Ống nhắm (Z)"><span class="glyph">${scopeGlyph(18)}</span><div class="scope-track" id="h-scopetrack"><div class="scope-ind"></div></div><span class="kbd">Z</span></div>
+        <div class="killfeed" id="h-feed"></div>
+      </div>
       <div class="center-msg" id="h-center"></div>
       <div class="prompt hidden" id="h-prompt"></div>
       <div class="hud-inv" id="h-inv"></div>
@@ -81,6 +101,7 @@ export class Hud {
       </div>
       <div class="hurt-flash" id="h-hurt"></div>
       <div class="zone-outside hidden" id="h-outside"></div>
+      <div class="scope-fx" id="h-scopefx"></div>
       <div class="fps hidden" id="h-fps"></div>
       <div id="h-overlay"></div>`;
     root.classList.remove('hidden');
@@ -96,6 +117,51 @@ export class Hud {
       const slot = (e.target as HTMLElement).closest<HTMLElement>('[data-slot]')?.dataset.slot as SlotName | undefined;
       if (slot) this.cb.equip(slot);
     });
+    this.el.scope.addEventListener('click', (e) => {
+      const level = (e.target as HTMLElement).closest<HTMLElement>('[data-scope]')?.dataset.scope;
+      if (level) this.cb.setScope(Number(level));
+    });
+  }
+
+  /** Called every snapshot and on local choices; touches the DOM only when something changed. */
+  renderScope(active: number, owned: readonly number[], enabled: boolean) {
+    this.el.scope.classList.toggle('disabled', !enabled);
+    const track = this.el.scopetrack;
+    const sig = owned.join();
+    if (sig !== this.scopeOwned) {
+      const animate = this.scopeOwned !== '';
+      this.scopeOwned = sig;
+      for (const [level, chip] of this.scopeChips) {
+        if (owned.includes(level)) continue;
+        chip.remove();
+        this.scopeChips.delete(level);
+      }
+      owned.forEach((level, i) => {
+        let chip = this.scopeChips.get(level);
+        if (!chip) {
+          chip = html(`<div class="scope-chip${animate ? ' new' : ''}" data-scope="${level}">x${level}</div>`);
+          this.scopeChips.set(level, chip);
+        }
+        chip.classList.toggle('active', level === active);
+        // child 0 is the sliding indicator; only misplaced chips move, so their entry animation isn't replayed
+        const at = track.children[i + 1] ?? null;
+        if (at !== chip) track.insertBefore(chip, at);
+      });
+    }
+    const index = Math.max(0, owned.indexOf(active));
+    if (index !== this.scopeIndex) {
+      this.scopeIndex = index;
+      track.style.setProperty('--i', String(index));
+    }
+    if (active === this.scopeActive) return;
+    this.scopeChips.get(this.scopeActive)?.classList.remove('active');
+    this.scopeChips.get(active)?.classList.add('active');
+    if (this.scopeActive !== 0 && enabled) {
+      this.el.scopefx.animate([{ opacity: 0 }, { opacity: 1, offset: 0.25 }, { opacity: 0 }], { duration: 420, easing: 'ease-out' });
+    }
+    this.scopeActive = active;
+    if (this.overlay !== 'inventory') return;
+    for (const cell of this.el.overlay.querySelectorAll<HTMLElement>('.scope-cell')) cell.classList.toggle('active', cell.dataset.scope === String(active));
   }
 
   get blocking(): boolean {
@@ -191,7 +257,7 @@ export class Hud {
   }
 
   private renderInventorySummary(me: SelfNet) {
-    const sig = JSON.stringify([me.ammo, me.med, me.armor, me.armorDur, me.bag, me.scope, me.scopes]);
+    const sig = JSON.stringify([me.ammo, me.med, me.armor, me.armorDur, me.bag]);
     if (sig === this.invSig) return;
     this.invSig = sig;
     const cap = BAG_CAPACITY[me.bag];
@@ -199,7 +265,6 @@ export class Hud {
     this.el.inv.innerHTML =
       row(me.armor ? (`armor${me.armor}` as IconId) : 'armor1', `Giáp: ${me.armor ? `cấp ${me.armor} (${me.armorDur})` : 'không có'}`) +
       row(me.bag ? (`bag${me.bag}` as IconId) : 'bag1', `Túi: ${me.bag ? `cấp ${me.bag}` : 'không có'}`) +
-      row(me.scope > 1 ? (`scope${me.scope}` as IconId) : 'scope2', `Ống nhắm: x${me.scope}`) +
       row('medkit', `Cứu thương: ${me.med}/${cap.medkit} <span class="kbd">Q</span>`) +
       AMMO_TYPES.map((t) => row(`ammo_${t}`, `${AMMO_NAMES[t]}: ${me.ammo[t]}/${cap.ammo[t]}`)).join('');
   }
@@ -277,7 +342,7 @@ export class Hud {
     const me = this.me;
     if (!me) return;
     const box = this.el.overlay;
-    const sig = JSON.stringify([me.p1, me.p2, me.pistol, me.melee, me.armor, me.armorDur, me.bag, me.med, me.gren, me.smoke, me.ammo, me.scope, me.scopes]);
+    const sig = JSON.stringify([me.p1, me.p2, me.pistol, me.melee, me.armor, me.armorDur, me.bag, me.med, me.gren, me.smoke, me.ammo, me.scopes]);
     // replacing the markup mid-press would swallow the tap, so wait for the release
     if (!force && (box.dataset.sig === sig || this.pressing)) return;
     box.dataset.sig = sig;
@@ -306,12 +371,16 @@ export class Hud {
           ${cell('smoke', me.smoke > 0, 'Bom khói', `${me.smoke} / ${cap.smoke}`, me.smoke ? 'smoke' : undefined)}
           ${AMMO_TYPES.map((t) => cell(`ammo_${t}`, me.ammo[t] > 0, AMMO_NAMES[t], `${me.ammo[t]} / ${cap.ammo[t]}`, me.ammo[t] ? `ammo_${t}` : undefined)).join('')}
         </div>
-        <h3>Ống nhắm</h3>
-        <div class="row">${me.scopes.map((s) => `<button class="btn small ${s === me.scope ? 'primary' : ''}" data-scope="${s}">x${s}</button>${s > 1 ? `<button class="btn small" data-drop="scope${s}" title="Vứt">✕</button>` : ''}`).join('')}</div>
+        <h3>Ống nhắm <span class="muted">· bấm để đổi</span></h3>
+        <div class="inv-grid scope-grid">${me.scopes.map((s) => scopeCell(s, s === this.scopeActive)).join('')}</div>
       </div></div>`;
     box.querySelector('[data-close]')?.addEventListener('click', () => this.show('none'));
     box.querySelectorAll<HTMLElement>('[data-drop]').forEach((b) => b.addEventListener('click', () => this.cb.drop(b.dataset.drop!)));
-    box.querySelectorAll<HTMLElement>('[data-scope]').forEach((b) => b.addEventListener('click', () => this.cb.setScope(Number(b.dataset.scope))));
+    box.querySelectorAll<HTMLElement>('[data-scope]').forEach((b) =>
+      b.addEventListener('click', (e) => {
+        if (!(e.target as HTMLElement).closest('[data-drop]')) this.cb.setScope(Number(b.dataset.scope));
+      }),
+    );
   }
 
   private renderPause(view: 'menu' | 'settings' | 'keys' | 'guide' | 'confirm') {

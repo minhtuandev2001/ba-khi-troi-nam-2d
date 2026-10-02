@@ -1,5 +1,5 @@
 import { settings } from '../settings';
-import { iconSvg, type IconId } from './icons';
+import { iconSvg, scopeGlyph, type IconId } from './icons';
 
 interface Stick {
   zone: HTMLElement;
@@ -40,6 +40,7 @@ export class TouchControls {
   private readonly radius: number;
   private readonly buttons = new Map<TouchButton, HTMLElement>();
   private modeValue: TouchMode = 'play';
+  private scopeLevel = 0;
 
   constructor(private readonly root: HTMLElement, onButton: (b: TouchButton) => void) {
     this.radius = 56 * settings.touchSize;
@@ -65,7 +66,7 @@ export class TouchControls {
       ['smoke', ic('smoke'), `right:${col2}px;bottom:${row(0)}`, size],
       ['grenade', ic('grenade'), `right:${col2}px;bottom:${row(1)}`, size],
       ['pause', '⏸', `left:10px;top:${56}px`, size],
-      ['scope', ic('scope4'), `left:10px;top:${56 + (size + gap)}px`, size],
+      ['scope', `${scopeGlyph(Math.round(size * 0.5))}<b class="tbadge">x1</b>`, `left:10px;top:${56 + (size + gap)}px`, size],
       ['map', '🗺️', `left:10px;top:${56 + 2 * (size + gap)}px`, size],
       ['inventory', ic('bag2'), `left:10px;top:${56 + 3 * (size + gap)}px`, size],
     ];
@@ -239,6 +240,16 @@ export class TouchControls {
     if (!btn) return;
     btn.classList.toggle('on', !!label);
     btn.style.opacity = label ? '1' : '0.45';
+  }
+
+  setScopeLabel(level: number) {
+    if (level === this.scopeLevel) return;
+    const first = this.scopeLevel === 0;
+    this.scopeLevel = level;
+    const badge = this.buttons.get('scope')?.querySelector<HTMLElement>('.tbadge');
+    if (!badge) return;
+    badge.textContent = `x${level}`;
+    if (!first) badge.animate([{ transform: 'scale(1.6)' }, { transform: 'scale(1)' }], { duration: 260, easing: 'cubic-bezier(0.3, 1.6, 0.6, 1)' });
   }
 
   destroy() {

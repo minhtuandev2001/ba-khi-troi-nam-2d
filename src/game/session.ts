@@ -12,6 +12,7 @@ import {
   TICK_MS,
   generateMap,
   playerSpeed,
+  scopeOfItem,
   stepMovement,
   weaponName,
   type ActionMsg,
@@ -42,6 +43,8 @@ import { Hud } from './Hud';
 import { TouchControls, type TouchButton, type TouchMode } from './Touch';
 
 const TICK_S = TICK_MS / 1000;
+/** Long enough for the server to apply the choice even on a slow link; actions arrive in order, so it converges. */
+const SCOPE_PENDING_MS = 1000;
 
 interface BufferedSnap {
   t: number;
@@ -91,6 +94,7 @@ export class GameSession {
   private predReady = false;
   private accumulator = 0;
   private aimAngle = 0;
+  private pendingScope: { level: number; at: number } | null = null;
 
   private keys = new Set<string>();
   private mouse = { x: 0, y: 0, down: false };
@@ -113,7 +117,7 @@ export class GameSession {
     this.hud = new Hud(document.getElementById('hud')!, this.map, start.roster, start.you, {
       equip: (slot) => this.action({ t: 'equip', slot }),
       drop: (what) => this.action({ t: 'drop', what: what as Extract<ActionMsg, { t: 'drop' }>['what'] }),
-      setScope: (level) => this.action({ t: 'scope', level }),
+      setScope: (level) => this.selectScope(level),
       spectate: (target) => this.socket.emit('spectate', target),
       leave: () => this.leave(),
     });
@@ -231,8 +235,12 @@ export class GameSession {
     return this.me?.pid ?? this.you;
   }
 
+  /** The locally chosen scope wins briefly so the camera reacts on click instead of a round trip later. */
   get viewScope(): number {
-    return this.me?.scope ?? 1;
+    const me = this.me;
+    if (!me) return 1;
+    const p = this.pendingScope;
+    return p && performance.now() - p.at < SCOPE_PENDING_MS ? p.level : me.scope;
   }
 
   nameOf(pid: number): string {
@@ -343,18 +351,34 @@ export class GameSession {
   }
 
   private cycleScope() {
-    if (!this.me) return;
-    const owned = SCOPE_LEVELS.filter((s) => this.me!.scopes.includes(s));
-    const idx = owned.indexOf(this.me.scope as (typeof owned)[number]);
-    const next = owned[(idx + 1) % owned.length];
-    this.action({ t: 'scope', level: next });
-    this.hud.center(`Ống nhắm x${next}`, 1000);
+    const me = this.me;
+    if (!me || !me.alive || this.spectating) return;
+    const owned = SCOPE_LEVELS.filter((s) => me.scopes.includes(s));
+    if (owned.length < 2) return this.hud.center('Bạn chưa có ống nhắm nào khác', 1200);
+    const idx = owned.indexOf(this.viewScope as (typeof owned)[number]);
+    this.selectScope(owned[(idx + 1) % owned.length]);
   }
 
-  private action(msg: ActionMsg) {
+  private selectScope(level: number) {
+    const me = this.me;
+    if (!me || !me.alive || this.spectating || !me.scopes.includes(level) || level === this.viewScope) return;
+    if (!this.action({ t: 'scope', level })) return;
+    this.pendingScope = { level, at: performance.now() };
+    this.syncScopeHud();
+  }
+
+  private syncScopeHud() {
+    if (!this.me) return;
+    const level = this.viewScope;
+    this.hud.renderScope(level, this.me.scopes, this.me.alive && !this.spectating);
+    this.touch?.setScopeLabel(level);
+  }
+
+  private action(msg: ActionMsg): boolean {
     // socket.io would queue it and replay it after reconnecting, long after the player meant it
-    if (this.ended || !this.socket.connected) return;
+    if (this.ended || !this.socket.connected) return false;
     this.socket.emit('action', msg);
+    return true;
   }
 
   private activeWeapon(me: SelfNet): WeaponId {
@@ -459,7 +483,8 @@ export class GameSession {
       const d = Math.hypot(lx - x, ly - y);
       if (d <= PICKUP_RANGE && (!best || d < best.d)) {
         const def = ITEMS[item];
-        best = { d, text: `Nhặt ${def.name}${def.kind === 'ammo' ? ` ×${amount}` : ''}` };
+        const owned = def.kind === 'scope' && me.scopes.includes(scopeOfItem(item));
+        best = { d, text: owned ? `Đã có ${def.name}` : `Nhặt ${def.name}${def.kind === 'ammo' ? ` ×${amount}` : ''}` };
       }
     }
     for (const door of this.map.doors) {
@@ -508,9 +533,12 @@ export class GameSession {
     if (!snap.spectating && snap.me.alive) this.reconcile(snap);
     else this.predReady = false;
 
+    if (this.pendingScope && (snap.spectating || !snap.me.alive || !snap.me.scopes.includes(this.pendingScope.level))) this.pendingScope = null;
+
     this.flushToScene();
     const pos = this.viewPosition();
     this.hud.update(snap.me, snap.alive, snap.z, snap.ad, snap.spectating, pos.x, pos.y);
+    this.syncScopeHud();
   };
 
   private reconcile(snap: SnapshotMsg) {
@@ -573,6 +601,8 @@ export class GameSession {
         break;
       case 'pickup': {
         const def = ITEMS[e.item];
+        // the server just switched to the new scope; a stale local choice must not override it
+        if (def.kind === 'scope') this.pendingScope = null;
         this.hud.feed(`Đã nhặt <b>${esc(def.name)}</b>${def.kind === 'ammo' ? ` ×${e.amount}` : ''}`);
         sfx.pickup(e.item);
         break;

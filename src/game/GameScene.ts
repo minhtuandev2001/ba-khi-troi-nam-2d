@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import {
   BASE_VIEW_DIAGONAL,
   CHEST_SIZE,
+  DOOR_WIDTH,
   ITEMS,
   MAP_SIZE,
   PLAYER_RADIUS,
@@ -9,11 +10,13 @@ import {
   WALL_THICKNESS,
   WEAPONS,
   angleDiff,
+  doorOutward,
   roomAt,
   PFLAG_DISCONNECTED,
   PFLAG_HEALING,
   type ArmorLevel,
   type BagLevel,
+  type Door,
   type GameEvent,
   type ItemId,
   type LootNet,
@@ -27,7 +30,36 @@ import type { GameSession } from './session';
 
 const ARMOR_COLORS = [0, 0xc9d6e0, 0x3fa3ff, 0x2b2f6b];
 const BAG_COLORS = [0, 0xc98a3d, 0x4fae3a, 0x8a4fd6];
+const ZOOM_EASE_MS = 90;
+const DOOR_WOOD = 0xc77a3a;
+const DOOR_FRAME = 0x5a3010;
+const DOOR_GAP = 0x3b2410;
 const SKIN = 0xffcf9e;
+
+/** Two stone steps outside an exterior door; (dx, dy) points away from the house. */
+function drawDoorstep(g: Phaser.GameObjects.Graphics, d: Door, dx: number, dy: number) {
+  const tier = (along: number, depth: number, fill: number) => {
+    const off = WALL_THICKNESS / 2 + depth / 2;
+    const cx = d.x + d.w / 2 + dx * off;
+    const cy = d.y + d.h / 2 + dy * off;
+    const w = dx ? depth : along;
+    const h = dx ? along : depth;
+    const x = cx - w / 2;
+    const y = cy - h / 2;
+    g.fillStyle(0x10284d, 0.2);
+    g.fillRect(x + 3, y + 4, w, h);
+    g.fillStyle(fill, 1);
+    g.fillRect(x, y, w, h);
+    g.lineStyle(3, 0x6b5536, 1);
+    g.strokeRect(x, y, w, h);
+    // worn highlight along the outer lip
+    g.lineStyle(2, 0xfff3d6, 0.8);
+    if (dx) g.lineBetween(x + (dx > 0 ? w - 4 : 4), y + 5, x + (dx > 0 ? w - 4 : 4), y + h - 5);
+    else g.lineBetween(x + 5, y + (dy > 0 ? h - 4 : 4), x + w - 5, y + (dy > 0 ? h - 4 : 4));
+  };
+  tier(DOOR_WIDTH + 40, 32, 0xb59d78);
+  tier(DOOR_WIDTH + 18, 17, 0xdcc8a2);
+}
 const OUTLINE = 0x10284d;
 
 interface Tracer {
@@ -148,7 +180,8 @@ export class GameScene extends Phaser.Scene {
   private lootViews = new Map<number, Phaser.GameObjects.Container>();
   private doorViews = new Map<number, Phaser.GameObjects.Rectangle>();
   private chestViews = new Map<number, Phaser.GameObjects.Container>();
-  private roofs = new Map<number, Phaser.GameObjects.Rectangle>();
+  private roofs = new Map<number, Phaser.GameObjects.Container>();
+  private doorMarks = new Map<number, Phaser.GameObjects.Rectangle[]>();
   private canopies: { img: Phaser.GameObjects.Image; x: number; y: number; r: number }[] = [];
   private throwViews = new Map<number, Phaser.GameObjects.Arc>();
   private smokeViews = new Map<number, Phaser.GameObjects.Arc>();
@@ -224,10 +257,12 @@ export class GameScene extends Phaser.Scene {
       this.canopies.push({ img, x: t.x, y: t.y, r: canopyR });
     }
 
+    const steps = this.add.graphics().setDepth(2.5);
     for (const d of map.doors) {
-      const rect = this.add.rectangle(d.x + d.w / 2, d.y + d.h / 2, d.w, d.h, 0xc77a3a).setStrokeStyle(3, 0x5a3010).setDepth(4);
+      const rect = this.add.rectangle(d.x + d.w / 2, d.y + d.h / 2, d.w, d.h, DOOR_WOOD).setStrokeStyle(3, DOOR_FRAME).setDepth(4);
       this.doorViews.set(d.id, rect);
-      this.setDoor(d.id, this.session.world.doorOpen[d.id]);
+      const out = doorOutward(map, d);
+      if (out) drawDoorstep(steps, d, out.dx, out.dy);
     }
 
     for (const c of map.chests) {
@@ -243,9 +278,24 @@ export class GameScene extends Phaser.Scene {
       const house = map.houses[room.houseId];
       const roof = this.add
         .rectangle(room.x + room.w / 2, room.y + room.h / 2, room.w + WALL_THICKNESS, room.h + WALL_THICKNESS, house.roof)
-        .setStrokeStyle(5, 0x10284d, 0.55)
-        .setDepth(30);
-      this.roofs.set(room.id, roof);
+        .setStrokeStyle(5, 0x10284d, 0.55);
+      this.roofs.set(room.id, this.add.container(0, 0, [roof]).setDepth(30));
+    }
+    // roofs overhang the walls and would hide every door, so each roof repeats the doors along its edge
+    const half = WALL_THICKNESS / 2;
+    for (const d of map.doors) {
+      const cx = d.x + d.w / 2;
+      const cy = d.y + d.h / 2;
+      const marks: Phaser.GameObjects.Rectangle[] = [];
+      for (const id of map.houses[d.houseId].roomIds) {
+        const r = map.rooms[id];
+        if (cx < r.x - half || cx > r.x + r.w + half || cy < r.y - half || cy > r.y + r.h + half) continue;
+        const mark = this.add.rectangle(cx, cy, d.w, d.h, DOOR_WOOD).setStrokeStyle(3, DOOR_FRAME);
+        this.roofs.get(id)!.add(mark);
+        marks.push(mark);
+      }
+      this.doorMarks.set(d.id, marks);
+      this.setDoor(d.id, this.session.world.doorOpen[d.id]);
     }
 
     this.tracerGfx = this.add.graphics().setDepth(12);
@@ -253,9 +303,9 @@ export class GameScene extends Phaser.Scene {
 
     this.scale.on('resize', (size: Phaser.Structs.Size) => {
       this.cameras.main.setSize(size.width, size.height);
-      this.updateZoom(true);
+      this.updateZoom(0, true);
     });
-    this.updateZoom(true);
+    this.updateZoom(0, true);
     startAmbient();
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, stopAmbient);
     this.events.once(Phaser.Scenes.Events.DESTROY, stopAmbient);
@@ -302,7 +352,8 @@ export class GameScene extends Phaser.Scene {
     const rect = this.doorViews.get(id);
     if (!rect) return;
     rect.setAlpha(open ? 0.25 : 1);
-    rect.setFillStyle(open ? 0xf0c890 : 0xc77a3a);
+    rect.setFillStyle(open ? 0xf0c890 : DOOR_WOOD);
+    for (const mark of this.doorMarks.get(id) ?? []) mark.setFillStyle(open ? DOOR_GAP : DOOR_WOOD);
   }
 
   removeChest(id: number) {
@@ -313,11 +364,18 @@ export class GameScene extends Phaser.Scene {
     this.particles(view.x, view.y, 0xa8732e, 10);
   }
 
-  private updateZoom(force = false) {
-    const scope = (this.session.viewScope ?? 1) as ScopeLevel;
+  private updateZoom(delta = 0, force = false) {
+    const scope = this.session.viewScope as ScopeLevel;
     const diag = Math.hypot(this.scale.width, this.scale.height);
-    const target = diag / (BASE_VIEW_DIAGONAL * SCOPE_VIEW_MULTIPLIER[scope]);
-    this.currentZoom = force ? target : this.currentZoom + (target - this.currentZoom) * 0.12;
+    const target = diag / (BASE_VIEW_DIAGONAL * (SCOPE_VIEW_MULTIPLIER[scope] ?? 1));
+    if (!force && this.currentZoom === target) return;
+    if (force || Math.abs(target - this.currentZoom) < target * 0.001) {
+      this.currentZoom = target;
+    } else {
+      // eased in log space so zooming in and out feel equally fast, independent of frame rate
+      const k = 1 - Math.exp(-delta / ZOOM_EASE_MS);
+      this.currentZoom = Math.exp(Math.log(this.currentZoom) + Math.log(target / this.currentZoom) * k);
+    }
     this.cameras.main.setZoom(this.currentZoom);
   }
 
@@ -504,7 +562,7 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    this.updateZoom();
+    this.updateZoom(delta);
     this.cameras.main.centerOn(view.x, view.y);
 
     const room = roomAt(s.map, view.x, view.y);

@@ -257,6 +257,12 @@ export function iconSvg(id: IconId, size = 64): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="${size}" height="${size}">${body}</svg>`;
 }
 
+/** Level-neutral crosshair for scope controls, which show the current level next to it. */
+export function scopeGlyph(size = 20): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">` +
+    `<circle cx="12" cy="12" r="7.5"/><path d="M12 1.5v5M12 17.5v5M1.5 12h5M17.5 12h5"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg>`;
+}
+
 /** Inline icon for DOM menus and HUD. */
 export function iconHtml(id: IconId, size = 28, extraClass = ''): string {
   return `<span class="item-icon ${extraClass}" style="width:${size}px;height:${size}px">${iconSvg(id, size)}</span>`;
