@@ -39,7 +39,7 @@ import { esc, toast } from '../ui/dom';
 import { sfx, stopAmbient, unlockAudio } from './audio';
 import { GameScene } from './GameScene';
 import { Hud } from './Hud';
-import { TouchControls, type TouchButton } from './Touch';
+import { TouchControls, type TouchButton, type TouchMode } from './Touch';
 
 const TICK_S = TICK_MS / 1000;
 
@@ -254,6 +254,8 @@ export class GameSession {
 
   private onTouchButton(b: TouchButton) {
     unlockAudio();
+    const mode = this.touchMode();
+    if (mode === 'off' || (mode === 'view' && b !== 'map' && b !== 'pause')) return;
     switch (b) {
       case 'reload': return this.action({ t: 'reload' });
       case 'interact': return this.action({ t: 'interact' });
@@ -292,7 +294,18 @@ export class GameSession {
     return 'fists';
   }
 
+  private touchMode(): TouchMode {
+    if (this.ended || this.destroyed || this.hud.current !== 'none') return 'off';
+    if (!this.me || !this.me.alive || this.spectating || this.hud.isDead) return 'view';
+    return 'play';
+  }
+
+  private syncTouchMode() {
+    this.touch?.setMode(this.touchMode());
+  }
+
   fixedUpdate(deltaMs: number) {
+    this.syncTouchMode();
     this.accumulator = Math.min(this.accumulator + deltaMs, TICK_MS * 5);
     while (this.accumulator >= TICK_MS) {
       this.accumulator -= TICK_MS;
@@ -307,13 +320,13 @@ export class GameSession {
   private sendInput() {
     const me = this.me;
     if (!me || !me.alive || this.spectating || this.ended || !this.predReady) return;
-    const blocked = this.hud.blocking;
+    const blocked = this.hud.current !== 'none' || this.hud.isDead || (this.touch !== null && this.touch.mode !== 'play');
     let mx = 0;
     let my = 0;
     let fire = false;
     let td = 200;
 
-    if (this.touch) {
+    if (this.touch && !blocked) {
       mx = this.touch.move.x;
       my = this.touch.move.y;
       const throwable = me.active === 'grenade' || me.active === 'smoke';
@@ -325,7 +338,7 @@ export class GameSession {
       fire = throwable ? this.touch.consumeRelease() : this.touch.fireHeld;
       if (!throwable) this.touch.consumeRelease();
       td = Math.max(0.15, this.touch.lastThrowMagnitude) * THROWABLE.maxDistance;
-    } else {
+    } else if (!this.touch) {
       if (!blocked) {
         if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) my -= 1;
         if (this.keys.has('KeyS') || this.keys.has('ArrowDown')) my += 1;
@@ -505,12 +518,14 @@ export class GameSession {
     if (this.ended) return;
     const killerAlive = msg.killer >= 0 && msg.killer !== this.you;
     this.hud.showDeath(msg, killerAlive);
+    this.syncTouchMode();
   };
 
   private onEnd = (msg: MatchEndMsg) => {
     this.ended = true;
     if (msg.placement === 1) sfx.victory();
     this.hud.showEnd(msg, () => this.exit());
+    this.syncTouchMode();
   };
 
   private onLeft = () => this.exit();

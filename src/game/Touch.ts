@@ -14,6 +14,15 @@ interface Stick {
 
 export type TouchButton = 'reload' | 'interact' | 'heal' | 'grenade' | 'smoke' | 'scope' | 'map' | 'inventory' | 'pause';
 
+/**
+ * play: everything active.
+ * view: dead or spectating; only pause and map remain.
+ * off:  a menu or result screen is open; the whole layer is hidden so it never steals taps.
+ */
+export type TouchMode = 'play' | 'view' | 'off';
+
+const VIEW_BUTTONS: ReadonlySet<TouchButton> = new Set(['pause', 'map']);
+
 /** On-screen joysticks: left moves, right aims and fires (release throws grenades). */
 export class TouchControls {
   move = { x: 0, y: 0 };
@@ -24,11 +33,13 @@ export class TouchControls {
   private readonly right: Stick;
   private readonly radius: number;
   private readonly buttons = new Map<TouchButton, HTMLElement>();
+  private modeValue: TouchMode = 'play';
 
   constructor(private readonly root: HTMLElement, onButton: (b: TouchButton) => void) {
     this.radius = 56 * settings.touchSize;
     root.innerHTML = '';
     root.classList.remove('hidden');
+    root.dataset.mode = this.modeValue;
     document.body.classList.add('touch-ui');
     this.left = this.createStick('left');
     this.right = this.createStick('right');
@@ -54,13 +65,13 @@ export class TouchControls {
     ];
     for (const [id, label, style, px] of defs) {
       const btn = document.createElement('div');
-      btn.className = 'tbtn';
+      btn.className = VIEW_BUTTONS.has(id) ? 'tbtn' : 'tbtn play-only';
       btn.innerHTML = label;
       btn.setAttribute('style', `${style};width:${px}px;height:${px}px`);
       btn.addEventListener('pointerdown', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        onButton(id);
+        if (this.allows(id)) onButton(id);
       });
       root.appendChild(btn);
       this.buttons.set(id, btn);
@@ -82,7 +93,7 @@ export class TouchControls {
     const stick: Stick = { zone, base, knob, pointerId: null, ox: 0, oy: 0, x: 0, y: 0 };
 
     zone.addEventListener('pointerdown', (e) => {
-      if (stick.pointerId !== null) return;
+      if (stick.pointerId !== null || this.modeValue !== 'play') return;
       e.preventDefault();
       zone.setPointerCapture(e.pointerId);
       const rect = zone.getBoundingClientRect();
@@ -95,7 +106,7 @@ export class TouchControls {
       if (side === 'right') this.aim.active = true;
     });
     zone.addEventListener('pointermove', (e) => {
-      if (e.pointerId !== stick.pointerId) return;
+      if (e.pointerId !== stick.pointerId || this.modeValue !== 'play') return;
       const rect = zone.getBoundingClientRect();
       let dx = e.clientX - rect.left - stick.ox;
       let dy = e.clientY - rect.top - stick.oy;
@@ -112,7 +123,7 @@ export class TouchControls {
     const end = (e: PointerEvent) => {
       if (e.pointerId !== stick.pointerId) return;
       stick.pointerId = null;
-      if (side === 'right' && this.lastAimMagnitude > 0.2) this.releasePulse = true;
+      if (side === 'right' && this.lastAimMagnitude > 0.2 && e.type === 'pointerup' && this.modeValue === 'play') this.releasePulse = true;
       stick.x = 0;
       stick.y = 0;
       base.classList.add('hidden');
@@ -122,7 +133,46 @@ export class TouchControls {
     };
     zone.addEventListener('pointerup', end);
     zone.addEventListener('pointercancel', end);
+    zone.addEventListener('lostpointercapture', end);
     return stick;
+  }
+
+  get mode(): TouchMode {
+    return this.modeValue;
+  }
+
+  setMode(mode: TouchMode) {
+    if (mode === this.modeValue) return;
+    this.modeValue = mode;
+    this.root.dataset.mode = mode;
+    if (mode !== 'play') this.reset();
+  }
+
+  private allows(b: TouchButton): boolean {
+    if (this.modeValue === 'off') return false;
+    return this.modeValue === 'play' || VIEW_BUTTONS.has(b);
+  }
+
+  /** Drops any held stick so nothing keeps moving, firing or throwing once play is interrupted. */
+  private reset() {
+    for (const s of [this.left, this.right]) {
+      if (s.pointerId !== null) {
+        const id = s.pointerId;
+        s.pointerId = null;
+        if (s.zone.hasPointerCapture?.(id)) s.zone.releasePointerCapture(id);
+      }
+      s.x = 0;
+      s.y = 0;
+      s.base.classList.add('hidden');
+      s.knob.classList.add('hidden');
+    }
+    this.move.x = 0;
+    this.move.y = 0;
+    this.aim.x = 0;
+    this.aim.y = 0;
+    this.aim.active = false;
+    this.releasePulse = false;
+    this.lastAimMagnitude = 0;
   }
 
   private place(s: Stick, ox: number, oy: number, dx: number, dy: number) {
@@ -153,11 +203,11 @@ export class TouchControls {
   }
 
   get fireHeld(): boolean {
-    return this.aim.active && this.aimMagnitude > 0.35;
+    return this.modeValue === 'play' && this.aim.active && this.aimMagnitude > 0.35;
   }
 
   consumeRelease(): boolean {
-    const v = this.releasePulse;
+    const v = this.releasePulse && this.modeValue === 'play';
     this.releasePulse = false;
     return v;
   }
@@ -170,6 +220,8 @@ export class TouchControls {
   }
 
   destroy() {
+    this.reset();
+    delete this.root.dataset.mode;
     document.body.classList.remove('touch-ui');
     this.root.innerHTML = '';
     this.root.classList.add('hidden');

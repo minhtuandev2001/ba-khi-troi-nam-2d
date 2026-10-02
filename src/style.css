@@ -457,6 +457,27 @@ input[type='checkbox'] { accent-color: #ffb51a; width: 18px; height: 18px; verti
 /* ------------------------------------------------------------ HUD */
 #hud { position: fixed; inset: 0; z-index: 10; pointer-events: none; font-size: 14px; user-select: none; }
 #hud .interactive { pointer-events: auto; }
+#h-overlay .overlay { pointer-events: auto; touch-action: manipulation; }
+/* auto margins centre the card but let a too-tall card start at the top and scroll, instead of clipping both ends */
+.overlay { align-items: flex-start; }
+.overlay > * { margin: auto; }
+#h-overlay .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+#h-overlay .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+#h-overlay .stat { padding: 8px 4px; }
+#h-overlay .card.narrow { width: min(460px, 100%); }
+@media (max-height: 500px) {
+  #h-overlay .overlay { padding: 8px; }
+  #h-overlay .card { padding: 12px 18px; }
+  #h-overlay .card h2 { margin: 0 0 2px; font-size: 20px; }
+  #h-overlay .card p { margin: 4px 0; }
+  #h-overlay .logo { font-size: 30px !important; line-height: 1.1; }
+  #h-overlay .stat .v { font-size: 20px; }
+  #h-overlay .spacer { height: 8px; }
+  #h-overlay .menu-list { gap: 6px; }
+  #h-overlay .menu-list .btn { padding-top: 7px; padding-bottom: 7px; }
+  #h-overlay .table-wrap { max-height: 120px !important; }
+  #h-overlay .inventory-panel { max-height: none; }
+}
 .hud-top-left { position: absolute; top: max(10px, env(safe-area-inset-top)); left: 10px; display: flex; gap: 8px; }
 .hud-pill,
 .killfeed div,
@@ -602,7 +623,11 @@ input[type='checkbox'] { accent-color: #ffb51a; width: 18px; height: 18px; verti
 .pause-btn { position: absolute; top: max(10px, env(safe-area-inset-top)); left: 50%; margin-left: 150px; pointer-events: auto; }
 
 /* ------------------------------------------------------------ touch controls */
-#touch { position: fixed; inset: 0; z-index: 12; pointer-events: none; user-select: none; -webkit-user-select: none; }
+/* below #hud so menus and result screens always sit on top of the joysticks */
+#touch { position: fixed; inset: 0; z-index: 9; pointer-events: none; user-select: none; -webkit-user-select: none; }
+#touch[data-mode='off'] { display: none; }
+#touch[data-mode='view'] .joy-zone,
+#touch[data-mode='view'] .play-only { display: none; }
 .joy-zone { position: absolute; bottom: 0; width: 45%; height: 60%; pointer-events: auto; touch-action: none; }
 .joy-zone.left { left: 0; }
 .joy-zone.right { right: 0; }
