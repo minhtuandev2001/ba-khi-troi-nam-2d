@@ -20,6 +20,7 @@ import {
   type GameEvent,
   type ItemId,
   type LootNet,
+  type Room,
   type ScopeLevel,
   type WeaponId,
 } from '../shared';
@@ -27,6 +28,7 @@ import { settings } from '../settings';
 import { sfx, spotAt, startAmbient, stopAmbient } from './audio';
 import { RARITY_COLOR, iconImages, iconTextureKey, rarityOf } from './icons';
 import type { GameSession } from './session';
+import { CHEST_BODY, PROP_RADIUS, TEX, TRUNK_RADIUS, makeWorldTextures } from './worldArt';
 
 const ARMOR_COLORS = [0, 0xc9d6e0, 0x3fa3ff, 0x2b2f6b];
 const BAG_COLORS = [0, 0xc98a3d, 0x4fae3a, 0x8a4fd6];
@@ -34,33 +36,75 @@ const ZOOM_EASE_MS = 90;
 const DOOR_WOOD = 0xc77a3a;
 const DOOR_FRAME = 0x5a3010;
 const DOOR_GAP = 0x3b2410;
-const SKIN = 0xffcf9e;
+const SKIN = 0xf0c08a;
 
-/** Two stone steps outside an exterior door; (dx, dy) points away from the house. */
-function drawDoorstep(g: Phaser.GameObjects.Graphics, d: Door, dx: number, dy: number) {
-  const tier = (along: number, depth: number, fill: number) => {
-    const off = WALL_THICKNESS / 2 + depth / 2;
-    const cx = d.x + d.w / 2 + dx * off;
-    const cy = d.y + d.h / 2 + dy * off;
-    const w = dx ? depth : along;
-    const h = dx ? along : depth;
-    const x = cx - w / 2;
-    const y = cy - h / 2;
-    g.fillStyle(0x10284d, 0.2);
-    g.fillRect(x + 3, y + 4, w, h);
-    g.fillStyle(fill, 1);
-    g.fillRect(x, y, w, h);
-    g.lineStyle(3, 0x6b5536, 1);
-    g.strokeRect(x, y, w, h);
-    // worn highlight along the outer lip
-    g.lineStyle(2, 0xfff3d6, 0.8);
-    if (dx) g.lineBetween(x + (dx > 0 ? w - 4 : 4), y + 5, x + (dx > 0 ? w - 4 : 4), y + h - 5);
-    else g.lineBetween(x + 5, y + (dy > 0 ? h - 4 : 4), x + w - 5, y + (dy > 0 ? h - 4 : 4));
-  };
-  tier(DOOR_WIDTH + 40, 32, 0xb59d78);
-  tier(DOOR_WIDTH + 18, 17, 0xdcc8a2);
+const OUTLINE = 0x2a1a0e;
+const BAMBOO_WALL = 0xb98d52;
+const BAMBOO_WALL_EDGE = 0x5c3a1a;
+const DARK_WOOD = 0x5a3a18;
+/** Tree kinds by id, roughly 4 bamboo : 3 areca : 3 banana. */
+const TREE_KINDS = ['bamboo', 'bamboo', 'areca', 'banana', 'areca', 'bamboo', 'banana', 'areca', 'bamboo', 'banana'] as const;
+/** Small rocks read better as clay jars; big ones stay limestone boulders. */
+const JAR_MAX_RADIUS = 42;
+
+/** Maps (along, across) offsets relative to an anchor, where `along` follows the unit vector (dx, dy). */
+function axis(x: number, y: number, dx: number, dy: number) {
+  return (along: number, across: number) => ({ x: x + dx * along - dy * across, y: y + dy * along + dx * across });
 }
-const OUTLINE = 0x10284d;
+
+/** Landing and wooden ladder of a stilt house outside an exterior door; (dx, dy) points away from the house. */
+function drawLadder(g: Phaser.GameObjects.Graphics, d: Door, dx: number, dy: number) {
+  const at = axis(d.x + d.w / 2, d.y + d.h / 2, dx, dy);
+  const line = (a: { x: number; y: number }, b: { x: number; y: number }, width: number, color: number) => {
+    g.lineStyle(width + 2.5, OUTLINE, 1);
+    g.lineBetween(a.x, a.y, b.x, b.y);
+    g.lineStyle(width, color, 1);
+    g.lineBetween(a.x, a.y, b.x, b.y);
+  };
+  const base = WALL_THICKNESS / 2;
+  const span = DOOR_WIDTH / 2 + 8;
+  const p0 = at(base, -span);
+  const p1 = at(base + 11, span);
+  const lx = Math.min(p0.x, p1.x);
+  const ly = Math.min(p0.y, p1.y);
+  const lw = Math.abs(p1.x - p0.x);
+  const lh = Math.abs(p1.y - p0.y);
+  g.fillStyle(OUTLINE, 0.22);
+  g.fillRect(lx + 3, ly + 4, lw, lh);
+  g.fillStyle(0xa8743e, 1);
+  g.fillRect(lx, ly, lw, lh);
+  g.lineStyle(2.5, OUTLINE, 1);
+  g.strokeRect(lx, ly, lw, lh);
+
+  const rail = DOOR_WIDTH / 2 - 12;
+  const u0 = base + 11;
+  const u1 = base + 42;
+  g.lineStyle(6, OUTLINE, 0.22);
+  for (const s of [-1, 1]) {
+    const a = at(u0, s * rail);
+    const b = at(u1, s * rail);
+    g.lineBetween(a.x + 3, a.y + 4, b.x + 3, b.y + 4);
+  }
+  for (const u of [u0 + 7, u0 + 15, u0 + 23]) line(at(u, -rail), at(u, rail), 3.2, 0xc08a52);
+  for (const s of [-1, 1]) line(at(u0, s * rail), at(u1, s * rail), 4.5, 0x8a5a30);
+}
+
+/** Crossed gable boards sticking out of a boat-shaped ridge, each ending in a bird head. */
+function drawGableHorns(g: Phaser.GameObjects.Graphics, x: number, y: number, dx: number, dy: number) {
+  const at = axis(x, y, dx, dy);
+  for (const s of [-1, 1]) {
+    const a = at(-14, -9 * s);
+    const b = at(22, 14 * s);
+    g.lineStyle(7.5, OUTLINE, 1);
+    g.lineBetween(a.x, a.y, b.x, b.y);
+    g.lineStyle(4.5, 0x8a5e2e, 1);
+    g.lineBetween(a.x, a.y, b.x, b.y);
+    g.fillStyle(OUTLINE, 1);
+    g.fillCircle(b.x, b.y, 5.5);
+    g.fillStyle(0x8a5e2e, 1);
+    g.fillCircle(b.x, b.y, 3.5);
+  }
+}
 
 interface Tracer {
   id: number;
@@ -99,11 +143,13 @@ class PlayerView {
     this.body = scene.add.circle(0, 0, PLAYER_RADIUS, SKIN).setStrokeStyle(isSelf ? 4 : 3, isSelf ? 0xffc21a : OUTLINE);
     this.armorRing = scene.add.circle(0, 0, PLAYER_RADIUS - 5).setStrokeStyle(5, 0x000000).setVisible(false);
     this.healRing = scene.add.circle(0, 0, PLAYER_RADIUS + 6).setStrokeStyle(3, 0x5cff7a, 0.8).setVisible(false);
-    this.container = scene.add.container(0, 0, [this.bag, this.gun, this.handL, this.handR, this.body, this.armorRing, this.healRing]);
+    // Đông Sơn feather headdress fanning out behind the head; it also shows which way the player faces
+    const plume = scene.add.image(-PLAYER_RADIUS + 8, 0, TEX.plume).setOrigin(1, 0.5).setDisplaySize(30, 30);
+    this.container = scene.add.container(0, 0, [plume, this.bag, this.gun, this.handL, this.handR, this.body, this.armorRing, this.healRing]);
     this.container.setDepth(10);
     this.label = name
       ? scene.add
-          .text(0, 0, name, { fontFamily: "'Baloo 2', sans-serif", fontSize: '15px', fontStyle: 'bold', color: isSelf ? '#ffe066' : '#ffffff', stroke: '#10284d', strokeThickness: 4 })
+          .text(0, 0, name, { fontFamily: "'Baloo 2', sans-serif", fontSize: '15px', fontStyle: 'bold', color: isSelf ? '#ffe066' : '#ffffff', stroke: '#2a1a0e', strokeThickness: 4 })
           .setOrigin(0.5, 1)
           .setDepth(60)
       : null;
@@ -179,7 +225,7 @@ export class GameScene extends Phaser.Scene {
   private players = new Map<number, PlayerView>();
   private lootViews = new Map<number, Phaser.GameObjects.Container>();
   private doorViews = new Map<number, Phaser.GameObjects.Rectangle>();
-  private chestViews = new Map<number, Phaser.GameObjects.Container>();
+  private chestViews = new Map<number, Phaser.GameObjects.Image>();
   private roofs = new Map<number, Phaser.GameObjects.Container>();
   private doorMarks = new Map<number, Phaser.GameObjects.Rectangle[]>();
   private canopies: { img: Phaser.GameObjects.Image; x: number; y: number; r: number }[] = [];
@@ -199,88 +245,82 @@ export class GameScene extends Phaser.Scene {
   }
 
   create() {
-    this.makeTextures();
+    makeWorldTextures(this);
     const map = this.session.map;
-    this.cameras.main.setBackgroundColor('#2f9be0');
+    this.cameras.main.setBackgroundColor('#2c6a66');
 
+    // the island sits in a jade river with an alluvial bank
     const shore = this.add.graphics().setDepth(-1);
-    shore.fillStyle(0x6cc4f0, 1);
+    shore.fillStyle(0x3f8a7e, 1);
     shore.fillRoundedRect(-150, -150, MAP_SIZE + 300, MAP_SIZE + 300, 160);
-    shore.fillStyle(0xf6dc95, 1);
+    shore.fillStyle(0xd2b077, 1);
     shore.fillRoundedRect(-80, -80, MAP_SIZE + 160, MAP_SIZE + 160, 90);
+    shore.fillStyle(0xb89458, 0.6);
+    shore.fillRoundedRect(-30, -30, MAP_SIZE + 60, MAP_SIZE + 60, 60);
 
-    this.add.tileSprite(0, 0, MAP_SIZE, MAP_SIZE, 'grass').setOrigin(0, 0).setDepth(0);
+    this.add.tileSprite(0, 0, MAP_SIZE, MAP_SIZE, TEX.grass).setOrigin(0, 0).setDepth(0);
 
     const decor = this.add.graphics().setDepth(1);
     for (const d of map.decor) {
       decor.fillStyle(d.color, 0.45);
       decor.fillCircle(d.x, d.y, d.r);
     }
-    decor.lineStyle(8, 0x4f9a2c, 1);
+    decor.lineStyle(8, 0x5f6a2c, 1);
     decor.strokeRect(0, 0, MAP_SIZE, MAP_SIZE);
 
-    const floors = this.add.graphics().setDepth(2);
     for (const h of map.houses) {
-      floors.fillStyle(h.floor, 1);
-      floors.fillRect(h.x, h.y, h.w, h.h);
-      floors.lineStyle(2, 0x8a5a2b, 0.25);
-      for (let y = h.y + 28; y < h.y + h.h; y += 28) floors.lineBetween(h.x, y, h.x + h.w, y);
+      this.add.tileSprite(h.x + h.w / 2, h.y + h.h / 2, h.w, h.h, TEX.slats).setTint(h.floor).setDepth(2);
     }
 
     const solid = this.add.graphics().setDepth(5);
     for (const w of map.walls) {
-      solid.fillStyle(w.houseId >= 0 ? 0xf7ead0 : 0xb9c4cc, 1);
-      solid.fillRect(w.x, w.y, w.w, w.h);
-      solid.lineStyle(3, w.houseId >= 0 ? 0x6b3e1e : 0x3e4a56, 1);
-      solid.strokeRect(w.x, w.y, w.w, w.h);
+      if (w.houseId >= 0) {
+        solid.fillStyle(BAMBOO_WALL, 1);
+        solid.fillRect(w.x, w.y, w.w, w.h);
+        solid.lineStyle(3, BAMBOO_WALL_EDGE, 1);
+        solid.strokeRect(w.x, w.y, w.w, w.h);
+        continue;
+      }
+      // free-standing walls become palisades of sharpened stakes
+      const vertical = w.h > w.w;
+      const thick = vertical ? w.w : w.h;
+      solid.fillStyle(OUTLINE, 0.2);
+      solid.fillRect(w.x + 4, w.y + 5, w.w, w.h);
+      const stakes = this.add.tileSprite(w.x + w.w / 2, w.y + w.h / 2, vertical ? w.h : w.w, thick, TEX.stakes).setTileScale(thick / 32).setDepth(5);
+      if (vertical) stakes.setAngle(90);
     }
     for (const r of map.rocks) {
-      solid.fillStyle(0x000000, 0.18);
-      solid.fillCircle(r.x + 5, r.y + 7, r.r);
-      solid.fillStyle(0xa9b7c2, 1);
-      solid.fillCircle(r.x, r.y, r.r);
-      solid.fillStyle(0xd4dee6, 1);
-      solid.fillCircle(r.x - r.r * 0.22, r.y - r.r * 0.24, r.r * 0.58);
-      solid.fillStyle(0xf2f7fa, 0.9);
-      solid.fillCircle(r.x - r.r * 0.38, r.y - r.r * 0.4, r.r * 0.18);
-      solid.lineStyle(4, 0x3e4a56, 1);
-      solid.strokeCircle(r.x, r.y, r.r);
+      const jar = r.r <= JAR_MAX_RADIUS;
+      const tex = jar ? TEX.jar : r.id % 2 ? TEX.boulder : TEX.boulder2;
+      const size = (r.r * 128) / PROP_RADIUS;
+      this.add.image(r.x, r.y, tex).setDisplaySize(size, size).setDepth(5);
     }
     for (const t of map.trees) {
-      solid.fillStyle(0x8a5a2b, 1);
-      solid.fillCircle(t.x, t.y, t.r);
-      solid.lineStyle(3, 0x4a2c10, 1);
-      solid.strokeCircle(t.x, t.y, t.r);
+      const kind = TREE_KINDS[t.id % TREE_KINDS.length];
+      const trunk = kind === 'bamboo' ? TEX.trunkBamboo : kind === 'banana' ? TEX.trunkBanana : TEX.trunkAreca;
+      const trunkSize = (t.r * 64) / TRUNK_RADIUS;
+      this.add.image(t.x, t.y, trunk).setDisplaySize(trunkSize, trunkSize).setRotation(t.id).setDepth(5);
       const canopyR = t.r * 2.4;
-      const img = this.add.image(t.x, t.y, 'canopy').setDisplaySize(canopyR * 2, canopyR * 2).setDepth(20);
+      const img = this.add.image(t.x, t.y, TEX[kind]).setDisplaySize(canopyR * 2, canopyR * 2).setDepth(20);
       img.rotation = (t.id * 1.7) % (Math.PI * 2);
       this.canopies.push({ img, x: t.x, y: t.y, r: canopyR });
     }
 
-    const steps = this.add.graphics().setDepth(2.5);
+    const ladders = this.add.graphics().setDepth(2.5);
     for (const d of map.doors) {
       const rect = this.add.rectangle(d.x + d.w / 2, d.y + d.h / 2, d.w, d.h, DOOR_WOOD).setStrokeStyle(3, DOOR_FRAME).setDepth(4);
       this.doorViews.set(d.id, rect);
       const out = doorOutward(map, d);
-      if (out) drawDoorstep(steps, d, out.dx, out.dy);
+      if (out) drawLadder(ladders, d, out.dx, out.dy);
     }
 
+    const chestSize = (CHEST_SIZE * 64) / CHEST_BODY;
     for (const c of map.chests) {
       if (!this.session.world.chestAlive[c.id]) continue;
-      const box = this.add.rectangle(0, 0, CHEST_SIZE, CHEST_SIZE, 0xd9893a).setStrokeStyle(4, 0x5a2e0a);
-      const band = this.add.rectangle(0, 0, CHEST_SIZE, 9, 0x8a4a14);
-      const lock = this.add.rectangle(0, 0, 12, 14, 0xffd23f).setStrokeStyle(2, 0x5a2e0a);
-      const cont = this.add.container(c.x, c.y, [box, band, lock]).setDepth(5);
-      this.chestViews.set(c.id, cont);
+      this.chestViews.set(c.id, this.add.image(c.x, c.y, TEX.chest).setDisplaySize(chestSize, chestSize).setDepth(5));
     }
 
-    for (const room of map.rooms) {
-      const house = map.houses[room.houseId];
-      const roof = this.add
-        .rectangle(room.x + room.w / 2, room.y + room.h / 2, room.w + WALL_THICKNESS, room.h + WALL_THICKNESS, house.roof)
-        .setStrokeStyle(5, 0x10284d, 0.55);
-      this.roofs.set(room.id, this.add.container(0, 0, [roof]).setDepth(30));
-    }
+    for (const room of map.rooms) this.roofs.set(room.id, this.buildRoof(room));
     // roofs overhang the walls and would hide every door, so each roof repeats the doors along its edge
     const half = WALL_THICKNESS / 2;
     for (const d of map.doors) {
@@ -312,40 +352,49 @@ export class GameScene extends Phaser.Scene {
     this.session.onSceneReady(this);
   }
 
-  private makeTextures() {
-    if (!this.textures.exists('grass')) {
-      const g = this.add.graphics();
-      g.fillStyle(0x7ccf4f, 1);
-      g.fillRect(0, 0, 128, 128);
-      for (let i = 0; i < 70; i++) {
-        g.fillStyle(i % 3 === 0 ? 0x9be36a : 0x6cbf3f, 0.9);
-        const x = (i * 37) % 128;
-        const y = (i * 53) % 128;
-        g.fillTriangle(x, y + 6, x + 2, y, x + 4, y + 6);
-      }
-      g.fillStyle(0xffffff, 0.8);
-      g.fillCircle(30, 90, 2);
-      g.fillStyle(0xffe066, 0.9);
-      g.fillCircle(96, 34, 2);
-      g.generateTexture('grass', 128, 128);
-      g.destroy();
+  /** Thatched boat roof of one room: tiered straw, a shaded far slope, the ridge, and crossed gable horns at the house ends. */
+  private buildRoof(room: Room): Phaser.GameObjects.Container {
+    const map = this.session.map;
+    const house = map.houses[room.houseId];
+    const half = WALL_THICKNESS / 2;
+    const x = room.x - half;
+    const y = room.y - half;
+    const w = room.w + WALL_THICKNESS;
+    const h = room.h + WALL_THICKNESS;
+    // one ridge direction per house, so neighbouring rooms line up into a single long roof
+    const alongX = house.w >= house.h;
+    const thatch = alongX
+      ? this.add.tileSprite(x + w / 2, y + h / 2, w, h, TEX.thatch)
+      : this.add.tileSprite(x + w / 2, y + h / 2, h, w, TEX.thatch).setAngle(90);
+    thatch.setTint(house.roof);
+
+    const g = this.add.graphics();
+    g.fillStyle(0x3a2410, 0.16);
+    if (alongX) g.fillRect(x, y + h / 2, w, h / 2);
+    else g.fillRect(x + w / 2, y, w / 2, h);
+    g.lineStyle(4, 0x4a3216, 0.85);
+    g.strokeRect(x, y, w, h);
+    const ridge = alongX ? [x + 4, y + h / 2, x + w - 4, y + h / 2] : [x + w / 2, y + 4, x + w / 2, y + h - 4];
+    g.lineStyle(9, DARK_WOOD, 1);
+    g.lineBetween(ridge[0], ridge[1], ridge[2], ridge[3]);
+    g.lineStyle(2.5, 0xe8cf8a, 0.7);
+    g.lineBetween(ridge[0] - (alongX ? 0 : 2), ridge[1] - (alongX ? 2 : 0), ridge[2] - (alongX ? 0 : 2), ridge[3] - (alongX ? 2 : 0));
+
+    const ends = alongX
+      ? [
+          { at: Math.abs(room.x - (house.x + half)) < 1, x, y: y + h / 2, dx: -1, dy: 0 },
+          { at: Math.abs(room.x + room.w - (house.x + house.w - half)) < 1, x: x + w, y: y + h / 2, dx: 1, dy: 0 },
+        ]
+      : [
+          { at: Math.abs(room.y - (house.y + half)) < 1, x: x + w / 2, y, dx: 0, dy: -1 },
+          { at: Math.abs(room.y + room.h - (house.y + house.h - half)) < 1, x: x + w / 2, y: y + h, dx: 0, dy: 1 },
+        ];
+    for (const e of ends) {
+      // a doorway at the gable already has a ladder; horns there would hide it
+      const blocked = map.doors.some((d) => d.houseId === house.id && Math.hypot(d.x + d.w / 2 - e.x, d.y + d.h / 2 - e.y) < DOOR_WIDTH);
+      if (e.at && !blocked) drawGableHorns(g, e.x, e.y, e.dx, e.dy);
     }
-    if (!this.textures.exists('canopy')) {
-      const g = this.add.graphics();
-      g.fillStyle(0x1f5e1a, 1);
-      g.fillCircle(64, 64, 64);
-      g.fillStyle(0x3fa02e, 1);
-      g.fillCircle(64, 64, 59);
-      g.fillStyle(0x5cc23f, 1);
-      g.fillCircle(54, 54, 40);
-      g.fillCircle(84, 78, 26);
-      g.fillCircle(40, 84, 20);
-      g.fillStyle(0x8ee35f, 0.9);
-      g.fillCircle(46, 44, 18);
-      g.fillCircle(80, 70, 10);
-      g.generateTexture('canopy', 128, 128);
-      g.destroy();
-    }
+    return this.add.container(0, 0, [thatch, g]).setDepth(30);
   }
 
   setDoor(id: number, open: boolean) {
@@ -387,7 +436,7 @@ export class GameScene extends Phaser.Scene {
     const def = ITEMS[item];
     const rarity = rarityOf(item);
     const color = RARITY_COLOR[rarity];
-    const shadow = this.add.ellipse(2, 18, 40, 12, 0x10284d, 0.22);
+    const shadow = this.add.ellipse(2, 18, 40, 12, OUTLINE, 0.22);
     const glow = this.add.circle(0, 0, 27, color, 0.3);
     glow.setName('glow');
     const outer = this.add.circle(0, 0, 22.5, OUTLINE);
@@ -402,7 +451,7 @@ export class GameScene extends Phaser.Scene {
     parts.push(icon);
     const name = this.add
       .text(0, 28, def.kind === 'ammo' ? `${def.name} ×${amount}` : def.name, {
-        fontFamily: "'Baloo 2', sans-serif", fontSize: '13px', fontStyle: 'bold', color: '#fff', stroke: '#10284d', strokeThickness: 4,
+        fontFamily: "'Baloo 2', sans-serif", fontSize: '13px', fontStyle: 'bold', color: '#fff', stroke: '#2a1a0e', strokeThickness: 4,
       })
       .setOrigin(0.5, 0)
       .setVisible(false);
@@ -671,17 +720,16 @@ export class GameScene extends Phaser.Scene {
       seen.add(id);
       let v = this.airdropViews.get(id);
       if (!v) {
-        const crate = this.add.rectangle(0, 0, 64, 64, 0x2f6fbf).setStrokeStyle(4, 0x13355c);
-        const c1 = this.add.rectangle(0, 0, 64, 10, 0xf4b63f);
-        const c2 = this.add.rectangle(0, 0, 10, 64, 0xf4b63f);
-        const chute = this.add.circle(0, -10, 60, 0xffffff, 0.75).setStrokeStyle(3, 0xe35151);
-        chute.setName('chute');
+        // a bronze drum carried down by a Lạc bird
+        const drum = this.add.image(0, 0, TEX.drum).setDisplaySize(76, 76);
+        const bird = this.add.image(0, -24, TEX.lacBird).setDisplaySize(196, 98);
+        bird.setName('chute');
         const shadow = this.add.circle(0, 0, 40, 0x000000, 0.25);
         shadow.setName('shadow');
-        v = this.add.container(x, y, [shadow, crate, c1, c2, chute]).setDepth(9);
+        v = this.add.container(x, y, [shadow, drum, bird]).setDepth(9);
         this.airdropViews.set(id, v);
       }
-      const chute = v.getByName('chute') as Phaser.GameObjects.Arc;
+      const chute = v.getByName('chute') as Phaser.GameObjects.Image;
       const shadow = v.getByName('shadow') as Phaser.GameObjects.Arc;
       if (landed) {
         chute.setVisible(false);

@@ -135,10 +135,17 @@ export class MapRenderer {
     for (const [, ax, ay, landed] of s.airdrops) {
       const px = ax * k - ox;
       const py = ay * k - oy;
-      ctx.fillStyle = landed ? '#ff4040' : '#ffb020';
-      ctx.fillRect(px - 5, py - 5, 10, 10);
-      ctx.strokeStyle = '#000';
-      ctx.strokeRect(px - 5, py - 5, 10, 10);
+      ctx.fillStyle = landed ? '#c0392b' : '#e8a93a';
+      ctx.strokeStyle = '#2a1a0e';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(px, py, 5.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#ffe9a8';
+      ctx.beginPath();
+      ctx.arc(px, py, 2, 0, Math.PI * 2);
+      ctx.fill();
     }
 
     const px = s.x * k - ox;

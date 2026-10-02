@@ -1,4 +1,4 @@
-# Sinh Tồn 2D: Frontend
+# Bá Khí - Trời Nam 2D: Frontend
 
 Giao diện cho game battle royale 2D nhìn từ trên xuống, chơi được trên máy tính và điện thoại. Game vẽ bằng Phaser 4, menu viết bằng HTML/CSS, build bằng Vite và TypeScript, kết nối backend qua REST và Socket.IO.
 

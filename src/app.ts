@@ -25,6 +25,7 @@ import { connectSocket, disconnectSocket } from './net';
 import { $, esc, formatDate, formatDuration, toast } from './ui/dom';
 import { NetStatus, SERVER_WAKING_TEXT } from './ui/netStatus';
 import { bindSettings, guidePanel, itemsPanel, keysPanel, settingsPanel } from './ui/panels';
+import { MODE_ICONS } from './ui/theme';
 
 type Screen = 'loading' | 'auth' | 'lobby' | 'queue' | 'room' | 'profile' | 'history' | 'panel' | 'game' | 'message';
 
@@ -50,7 +51,7 @@ export class App {
     if (invite && isUuid(invite)) sessionStorage.setItem(PENDING_ROOM_KEY, invite);
     if (invite) history.replaceState(null, '', location.pathname);
 
-    this.render('loading', `<div class="screen"><div class="logo">SINH TỒN 2D</div><div class="spinner"></div><p class="muted center" id="boot-hint"></p></div>`);
+    this.render('loading', `<div class="screen"><div class="logo">BÁ KHÍ<span>TRỜI NAM 2D</span></div><div class="spinner"></div><p class="muted center" id="boot-hint"></p></div>`);
     const hintTimer = window.setTimeout(() => {
       const hint = this.ui.querySelector('#boot-hint');
       if (hint) hint.textContent = SERVER_WAKING_TEXT;
@@ -145,7 +146,8 @@ export class App {
     let avatar: string = AVATARS[Math.floor(Math.random() * AVATARS.length)];
     this.render('auth', `
       <div class="screen">
-        <div class="logo">SINH TỒN 2D</div>
+        <div class="logo-kicker">Huyền sử Văn Lang</div>
+        <div class="logo">BÁ KHÍ<span>TRỜI NAM 2D</span></div>
         <div class="subtitle">Battle royale nhìn từ trên xuống · tối đa ${MAX_PLAYERS} người mỗi trận</div>
         <div class="narrow">
           ${pendingRoom ? '<div class="notice" style="margin-bottom:12px">Bạn được mời vào một phòng chơi. Hãy đăng nhập hoặc đăng ký để vào phòng.</div>' : ''}
@@ -447,22 +449,23 @@ export class App {
         ${this.header(true)}
         <div class="lobby-main">
           <div class="lobby-hero">
-            <div class="logo">SINH TỒN 2D</div>
+            <div class="logo-kicker">Huyền sử Văn Lang</div>
+            <div class="logo">BÁ KHÍ<span>TRỜI NAM 2D</span></div>
             <div class="subtitle">Nhặt đồ, né bo, trụ lại đến cuối cùng</div>
           </div>
           <div class="modes">
             <div class="card mode-card" data-mode="pvp">
-              <div class="icon">⚔️</div><h3>${MODE_NAMES.pvp}</h3>
+              <div class="icon">${MODE_ICONS.pvp}</div><h3>${MODE_NAMES.pvp}</h3>
               <p>Ghép trận tự động. Trận bắt đầu khi đủ ${MAX_PLAYERS} người chơi thật.</p>
               <span class="btn primary mode-cta">Tìm trận</span>
             </div>
             <div class="card mode-card" data-mode="bots">
-              <div class="icon">🤖</div><h3>${MODE_NAMES.bots}</h3>
+              <div class="icon">${MODE_ICONS.bots}</div><h3>${MODE_NAMES.bots}</h3>
               <p>Vào trận ngay với ${MAX_PLAYERS - 1} bot. Phù hợp để luyện tập.</p>
               <span class="btn primary mode-cta">Chơi ngay</span>
             </div>
             <div class="card mode-card" data-mode="private">
-              <div class="icon">👥</div><h3>${MODE_NAMES.private}</h3>
+              <div class="icon">${MODE_ICONS.private}</div><h3>${MODE_NAMES.private}</h3>
               <p>Tạo phòng và mời bạn bè bằng mã phòng hoặc đường link.</p>
               <button class="btn primary mode-cta" id="create-room">Tạo phòng</button>
               <div class="join-row">
