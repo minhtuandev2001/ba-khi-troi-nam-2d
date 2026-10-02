@@ -33,6 +33,12 @@ export interface HudCallbacks {
 type Overlay = 'none' | 'inventory' | 'map' | 'pause' | 'death' | 'end';
 
 const SLOT_KEYS: Record<SlotName, string> = { p1: '1', p2: '2', pistol: 'E', melee: 'V', grenade: '3', smoke: '4' };
+const GUN_SLOTS = ['p1', 'p2', 'pistol'] as const;
+
+/** Snapshots arrive 15 times a second; skipping identical writes avoids needless style and layout work. */
+function setText(el: HTMLElement, text: string) {
+  if (el.textContent !== text) el.textContent = text;
+}
 
 function scopeCell(level: number, active: boolean): string {
   const id = `scope${level}` as IconId;
@@ -52,6 +58,8 @@ export class Hud {
   private overlay: Overlay = 'none';
   private bigMap: HTMLCanvasElement | null = null;
   private slotSig = '';
+  private zoneHtml = '';
+  private promptHtml: string | null = null;
   private invSig = '';
   private me: SelfNet | null = null;
   private zone: ZoneNet | null = null;
@@ -180,19 +188,23 @@ export class Hud {
     this.me = me;
     this.zone = zone;
     this.airdrops = airdrops;
-    this.el.alive.textContent = `👤 ${alive}`;
-    this.el.kills.textContent = `💀 ${me.kills}`;
+    setText(this.el.alive, `👤 ${alive}`);
+    setText(this.el.kills, `💀 ${me.kills}`);
 
     const [, , , , , , phase, stage, left, dps] = zone;
     const label = stage === 'wait' ? `Bo ${phase} thu nhỏ sau` : stage === 'shrink' ? `Bo ${phase} đang thu nhỏ` : 'Bo cuối';
     const outside = Math.hypot(x - zone[0], y - zone[1]) > zone[2];
-    this.el.zone.innerHTML = `${label} <b>${stage === 'done' ? '' : formatDuration(left)}</b>${outside ? ` <span class="warn">· Ngoài bo −${dps}/s</span>` : ''}`;
+    const zoneHtml = `${label} <b>${stage === 'done' ? '' : formatDuration(left)}</b>${outside ? ` <span class="warn">· Ngoài bo −${dps}/s</span>` : ''}`;
+    if (zoneHtml !== this.zoneHtml) {
+      this.zoneHtml = zoneHtml;
+      this.el.zone.innerHTML = zoneHtml;
+    }
     this.el.outside.classList.toggle('hidden', !outside || !me.alive);
 
     const hpPct = Math.max(0, (me.hp / MAX_HP) * 100);
     this.el.hp.style.width = `${hpPct}%`;
     this.el.hp.classList.toggle('low', hpPct < 30);
-    this.el.hptext.textContent = `${Math.ceil(me.hp)} / ${MAX_HP}`;
+    setText(this.el.hptext, `${Math.ceil(me.hp)} / ${MAX_HP}`);
     const armorMax = me.armor ? [0, 60, 90, 130][me.armor] : 1;
     this.el.armor.style.width = `${me.armor ? (me.armorDur / armorMax) * 100 : 0}%`;
 
@@ -205,7 +217,7 @@ export class Hud {
         return s ? WEAPONS[s.w].reloadMs : 1000;
       })();
       prog.classList.remove('hidden');
-      prog.querySelector<HTMLElement>('.progress-label')!.textContent = `${healing ? 'Đang dùng túi cứu thương' : 'Đang thay đạn'} ${(left / 1000).toFixed(1)}s`;
+      setText(prog.querySelector<HTMLElement>('.progress-label')!, `${healing ? 'Đang dùng túi cứu thương' : 'Đang thay đạn'} ${(left / 1000).toFixed(1)}s`);
       prog.querySelector<HTMLElement>('.progress > div')!.style.width = `${(1 - left / total) * 100}%`;
     } else {
       prog.classList.add('hidden');
@@ -238,14 +250,26 @@ export class Hud {
   }
 
   private renderSlots(me: SelfNet) {
-    const sig = JSON.stringify([me.p1, me.p2, me.pistol, me.melee, me.active, me.gren, me.smoke, me.ammo]);
-    if (sig === this.slotSig) return;
-    this.slotSig = sig;
+    const sig = JSON.stringify([me.p1?.w, me.p2?.w, me.pistol?.w, me.melee, me.active, me.gren, me.smoke]);
+    if (sig !== this.slotSig) {
+      this.slotSig = sig;
+      this.buildSlots(me);
+    }
+    // ammo changes with every shot, so only the counters are touched
+    for (const slot of GUN_SLOTS) {
+      const s = me[slot];
+      if (!s) continue;
+      const a = this.el.slots.querySelector<HTMLElement>(`[data-slot="${slot}"] .a`);
+      if (a) setText(a, `${s.mag} / ${me.ammo[WEAPONS[s.w].ammo!]}`);
+    }
+  }
+
+  private buildSlots(me: SelfNet) {
     const gun = (slot: 'p1' | 'p2' | 'pistol') => {
       const s = me[slot];
       if (!s) return `<div class="slot empty" data-slot="${slot}"><span class="k">${SLOT_KEYS[slot]}</span><div class="si"></div><div class="n">${slot === 'pistol' ? 'Súng lục' : 'Trống'}</div><div class="a">&nbsp;</div></div>`;
       const def = WEAPONS[s.w];
-      return `<div class="slot ${me.active === slot ? 'active' : ''}" data-slot="${slot}"><span class="k">${SLOT_KEYS[slot]}</span><div class="si">${iconSvg(s.w, 30)}</div><div class="n">${esc(def.name)}</div><div class="a">${s.mag} / ${me.ammo[def.ammo!]}</div></div>`;
+      return `<div class="slot ${me.active === slot ? 'active' : ''}" data-slot="${slot}"><span class="k">${SLOT_KEYS[slot]}</span><div class="si">${iconSvg(s.w, 30)}</div><div class="n">${esc(def.name)}</div><div class="a"></div></div>`;
     };
     const simple = (slot: SlotName, icon: IconId, name: string, count: string, empty: boolean) =>
       `<div class="slot ${me.active === slot ? 'active' : ''} ${empty ? 'empty' : ''}" data-slot="${slot}"><span class="k">${SLOT_KEYS[slot]}</span><div class="si">${iconSvg(icon, 30)}</div><div class="n">${name}</div><div class="a">${count}</div></div>`;
@@ -292,6 +316,8 @@ export class Hud {
   }
 
   prompt(text: string | null) {
+    if (text === this.promptHtml) return;
+    this.promptHtml = text;
     this.el.prompt.classList.toggle('hidden', !text);
     if (text) this.el.prompt.innerHTML = text;
   }

@@ -227,6 +227,7 @@ export class GameScene extends Phaser.Scene {
   private doorViews = new Map<number, Phaser.GameObjects.Rectangle>();
   private chestViews = new Map<number, Phaser.GameObjects.Image>();
   private roofs = new Map<number, Phaser.GameObjects.Container>();
+  private cullables: { obj: Phaser.GameObjects.Graphics | Phaser.GameObjects.Container; x0: number; y0: number; x1: number; y1: number }[] = [];
   private doorMarks = new Map<number, Phaser.GameObjects.Rectangle[]>();
   private canopies: { img: Phaser.GameObjects.Image; x: number; y: number; r: number }[] = [];
   private throwViews = new Map<number, Phaser.GameObjects.Arc>();
@@ -260,32 +261,44 @@ export class GameScene extends Phaser.Scene {
 
     this.add.tileSprite(0, 0, MAP_SIZE, MAP_SIZE, TEX.grass).setOrigin(0, 0).setDepth(0);
 
-    const decor = this.add.graphics().setDepth(1);
+    // Phaser re-tessellates every Graphics each frame, so static vector art is split per object and culled offscreen
     for (const d of map.decor) {
-      decor.fillStyle(d.color, 0.45);
-      decor.fillCircle(d.x, d.y, d.r);
+      const g = this.add.graphics().setDepth(1);
+      g.fillStyle(d.color, 0.45);
+      g.fillCircle(d.x, d.y, d.r);
+      this.cull(g, d.x - d.r, d.y - d.r, d.x + d.r, d.y + d.r);
     }
-    decor.lineStyle(8, 0x5f6a2c, 1);
-    decor.strokeRect(0, 0, MAP_SIZE, MAP_SIZE);
+    const border = this.add.graphics().setDepth(1);
+    border.lineStyle(8, 0x5f6a2c, 1);
+    border.strokeRect(0, 0, MAP_SIZE, MAP_SIZE);
 
     for (const h of map.houses) {
       this.add.tileSprite(h.x + h.w / 2, h.y + h.h / 2, h.w, h.h, TEX.slats).setTint(h.floor).setDepth(2);
     }
 
-    const solid = this.add.graphics().setDepth(5);
-    for (const w of map.walls) {
-      if (w.houseId >= 0) {
-        solid.fillStyle(BAMBOO_WALL, 1);
-        solid.fillRect(w.x, w.y, w.w, w.h);
-        solid.lineStyle(3, BAMBOO_WALL_EDGE, 1);
-        solid.strokeRect(w.x, w.y, w.w, w.h);
-        continue;
+    for (const h of map.houses) {
+      const g = this.add.graphics().setDepth(5);
+      for (const w of map.walls) {
+        if (w.houseId !== h.id) continue;
+        g.fillStyle(BAMBOO_WALL, 1);
+        g.fillRect(w.x, w.y, w.w, w.h);
+        g.lineStyle(3, BAMBOO_WALL_EDGE, 1);
+        g.strokeRect(w.x, w.y, w.w, w.h);
       }
-      // free-standing walls become palisades of sharpened stakes
+      const m = WALL_THICKNESS + 4;
+      this.cull(g, h.x - m, h.y - m, h.x + h.w + m, h.y + h.h + m);
+    }
+    const palisadeShadows = this.add.graphics().setDepth(5);
+    for (const w of map.walls) {
+      if (w.houseId >= 0) continue;
+      palisadeShadows.fillStyle(OUTLINE, 0.2);
+      palisadeShadows.fillRect(w.x + 4, w.y + 5, w.w, w.h);
+    }
+    // free-standing walls become palisades of sharpened stakes
+    for (const w of map.walls) {
+      if (w.houseId >= 0) continue;
       const vertical = w.h > w.w;
       const thick = vertical ? w.w : w.h;
-      solid.fillStyle(OUTLINE, 0.2);
-      solid.fillRect(w.x + 4, w.y + 5, w.w, w.h);
       const stakes = this.add.tileSprite(w.x + w.w / 2, w.y + w.h / 2, vertical ? w.h : w.w, thick, TEX.stakes).setTileScale(thick / 32).setDepth(5);
       if (vertical) stakes.setAngle(90);
     }
@@ -306,12 +319,17 @@ export class GameScene extends Phaser.Scene {
       this.canopies.push({ img, x: t.x, y: t.y, r: canopyR });
     }
 
-    const ladders = this.add.graphics().setDepth(2.5);
+    const ladders = map.houses.map((h) => {
+      const g = this.add.graphics().setDepth(2.5);
+      const m = WALL_THICKNESS + 64;
+      this.cull(g, h.x - m, h.y - m, h.x + h.w + m, h.y + h.h + m);
+      return g;
+    });
     for (const d of map.doors) {
       const rect = this.add.rectangle(d.x + d.w / 2, d.y + d.h / 2, d.w, d.h, DOOR_WOOD).setStrokeStyle(3, DOOR_FRAME).setDepth(4);
       this.doorViews.set(d.id, rect);
       const out = doorOutward(map, d);
-      if (out) drawLadder(ladders, d, out.dx, out.dy);
+      if (out) drawLadder(ladders[d.houseId], d, out.dx, out.dy);
     }
 
     const chestSize = (CHEST_SIZE * 64) / CHEST_BODY;
@@ -320,7 +338,13 @@ export class GameScene extends Phaser.Scene {
       this.chestViews.set(c.id, this.add.image(c.x, c.y, TEX.chest).setDisplaySize(chestSize, chestSize).setDepth(5));
     }
 
-    for (const room of map.rooms) this.roofs.set(room.id, this.buildRoof(room));
+    for (const room of map.rooms) {
+      const roof = this.buildRoof(room);
+      this.roofs.set(room.id, roof);
+      // gable horns reach about 30px past the eaves
+      const m = WALL_THICKNESS + 32;
+      this.cull(roof, room.x - m, room.y - m, room.x + room.w + m, room.y + room.h + m);
+    }
     // roofs overhang the walls and would hide every door, so each roof repeats the doors along its edge
     const half = WALL_THICKNESS / 2;
     for (const d of map.doors) {
@@ -395,6 +419,25 @@ export class GameScene extends Phaser.Scene {
       if (e.at && !blocked) drawGableHorns(g, e.x, e.y, e.dx, e.dy);
     }
     return this.add.container(0, 0, [thatch, g]).setDepth(30);
+  }
+
+  private cull(obj: Phaser.GameObjects.Graphics | Phaser.GameObjects.Container, x0: number, y0: number, x1: number, y1: number) {
+    this.cullables.push({ obj, x0, y0, x1, y1 });
+  }
+
+  /** Hides culled objects outside the view; the margin covers camera shake. */
+  private applyCulling(cx: number, cy: number) {
+    const cam = this.cameras.main;
+    const hw = cam.width / cam.zoom / 2 + 64;
+    const hh = cam.height / cam.zoom / 2 + 64;
+    const x0 = cx - hw;
+    const x1 = cx + hw;
+    const y0 = cy - hh;
+    const y1 = cy + hh;
+    for (const c of this.cullables) {
+      const visible = c.x1 > x0 && c.x0 < x1 && c.y1 > y0 && c.y0 < y1;
+      if (c.obj.visible !== visible) c.obj.setVisible(visible);
+    }
   }
 
   setDoor(id: number, open: boolean) {
@@ -613,6 +656,7 @@ export class GameScene extends Phaser.Scene {
 
     this.updateZoom(delta);
     this.cameras.main.centerOn(view.x, view.y);
+    this.applyCulling(view.x, view.y);
 
     const room = roomAt(s.map, view.x, view.y);
     this.footsteps(view.x, view.y, room >= 0);
