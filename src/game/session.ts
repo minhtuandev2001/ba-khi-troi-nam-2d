@@ -10,6 +10,7 @@ import {
   SCOPE_LEVELS,
   THROWABLE,
   TICK_MS,
+  TRAINING_MAP,
   generateMap,
   playerSpeed,
   scopeOfItem,
@@ -19,11 +20,15 @@ import {
   type AirdropNet,
   type ArmorLevel,
   type BagLevel,
+  type BoarNet,
   type DeathMsg,
   type GameEvent,
   type GameMap,
   type InputMsg,
+  type LobbyNet,
   type LootNet,
+  type MarkerNet,
+  type MoveBounds,
   type MatchEndMsg,
   type MatchStartMsg,
   type PlayerNet,
@@ -35,11 +40,13 @@ import {
   type WeaponId,
   type ZoneNet,
 } from '../shared';
-import { settings, useTouchControls } from '../settings';
+import { onSettingsChange, settings, useTouchControls } from '../settings';
 import { esc } from '../ui/dom';
+import { nameHtml } from '../ui/names';
 import { sfx, stopAmbient, unlockAudio } from './audio';
 import { GameScene } from './GameScene';
 import { Hud } from './Hud';
+import { mateColors } from './team';
 import { TouchControls, type TouchButton, type TouchMode } from './Touch';
 
 const TICK_S = TICK_MS / 1000;
@@ -68,6 +75,10 @@ export class GameSession {
   readonly map: GameMap;
   readonly world: CollisionWorld;
   readonly you: number;
+  /** An admin watching without playing: nothing is sent but the choice of who to follow. */
+  readonly observer: boolean;
+  /** Teammates' colours (empty in solo modes). */
+  readonly mates: Map<number, string>;
   readonly hud: Hud;
   private readonly touch: TouchControls | null;
   private readonly game: Phaser.Game;
@@ -79,7 +90,16 @@ export class GameSession {
   smokes: SmokeNet[] = [];
   throwables: ThrowableNet[] = [];
   airdrops: AirdropNet[] = [];
+  /** Training range targets from the latest snapshot, and that snapshot's server time. */
+  boars: BoarNet[] = [];
+  boarsAt = 0;
   ping = 0;
+  /** Set while the match is still in its waiting area. */
+  lobby: LobbyNet | null = null;
+  /** Map markers the player can see: their own and, in team matches, their teammates'. */
+  markers: MarkerNet[] = [];
+  /** Where each visible marker was in the previous snapshot; null until the first one, so joining is quiet. */
+  private markerSpots: Map<number, string> | null = null;
   private alive = 0;
   private loot = new Map<number, LootNet>();
   private pendingLoot: { add: LootNet[]; del: number[] } = { add: [], del: [] };
@@ -100,6 +120,8 @@ export class GameSession {
   private mouse = { x: 0, y: 0, down: false };
   private ended = false;
   private lastPrompt = 0;
+  /** The auto-pickup choice last sent to the server; null makes the next sync send it again. */
+  private sentAutoPickup: boolean | null = null;
   private pingTimer: number;
   private readonly cleanups: (() => void)[] = [];
 
@@ -108,11 +130,13 @@ export class GameSession {
     private readonly socket: Socket,
     private readonly onExit: () => void,
   ) {
-    this.map = generateMap(start.seed);
+    this.map = generateMap(start.mapId);
     this.world = new CollisionWorld(this.map);
     start.doorsOpen.forEach((open, i) => (this.world.doorOpen[i] = open));
     start.chestsAlive.forEach((alive, i) => (this.world.chestAlive[i] = alive));
     this.you = start.you;
+    this.observer = start.observer === true;
+    this.mates = mateColors(start.roster, start.you);
 
     this.hud = new Hud(document.getElementById('hud')!, this.map, start.roster, start.you, {
       equip: (slot) => this.action({ t: 'equip', slot }),
@@ -120,11 +144,20 @@ export class GameSession {
       setScope: (level) => this.selectScope(level),
       spectate: (target) => this.socket.emit('spectate', target),
       leave: () => this.leave(),
+      mark: (at) => this.mark(at),
+      ...(this.observer ? {
+        observe: {
+          step: (dir: 1 | -1) => this.observeStep(dir),
+          kick: (pid: number) => this.socket.emit('observe:kick', pid),
+        },
+      } : {}),
     });
 
-    this.touch = useTouchControls() ? new TouchControls(document.getElementById('touch')!, (b) => this.onTouchButton(b)) : null;
+    this.touch = useTouchControls()
+      ? new TouchControls(document.getElementById('touch')!, (b) => this.onTouchButton(b), start.mapId === TRAINING_MAP)
+      : null;
 
-    const dpr = settings.quality === 'high' ? Math.min(window.devicePixelRatio || 1, 2) : 1;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     this.game = new Phaser.Game({
       type: Phaser.AUTO,
       parent: 'game',
@@ -137,7 +170,7 @@ export class GameSession {
         height: Math.round(window.innerHeight * dpr),
         zoom: 1 / dpr,
       },
-      render: { antialias: true, powerPreference: 'high-performance' },
+      render: { antialias: true, powerPreference: 'high-performance', mipmapFilter: 'LINEAR_MIPMAP_LINEAR' },
       input: { touch: !this.touch, mouse: { preventDefaultWheel: true } },
       scene: [new GameScene(this)],
     });
@@ -151,6 +184,7 @@ export class GameSession {
     this.bindInput();
     this.guardNavigation();
     this.keepScreenAwake();
+    this.cleanups.push(onSettingsChange(() => this.syncAutoPickup()));
 
     this.pingTimer = window.setInterval(() => {
       const t = performance.now();
@@ -189,6 +223,14 @@ export class GameSession {
     this.seq = 0;
     this.pending = [];
     this.predReady = false;
+    this.markerSpots = null;
+    this.sentAutoPickup = null;
+    this.syncAutoPickup();
+  }
+
+  private syncAutoPickup() {
+    const on = settings.autoPickup;
+    if (on !== this.sentAutoPickup && this.action({ t: 'autoPickup', on })) this.sentAutoPickup = on;
   }
 
   /** Android back / swipe-back opens the pause menu instead of leaving the page; reload asks first. */
@@ -247,10 +289,25 @@ export class GameSession {
     return this.start.roster.find((r) => r.pid === pid)?.name ?? '???';
   }
 
+  isAdmin(pid: number): boolean {
+    return this.start.roster.find((r) => r.pid === pid)?.admin === true;
+  }
+
   onSceneReady(scene: GameScene) {
     this.scene = scene;
     for (const l of this.loot.values()) scene.addLoot(l);
     this.flushToScene();
+    this.syncAutoPickup();
+  }
+
+  /** Same circle the server confines movement to while the waiting area is open. */
+  private get bounds(): MoveBounds | null {
+    const lb = this.lobby;
+    return lb ? { x: lb[1], y: lb[2], r: lb[3] } : null;
+  }
+
+  private observeStep(dir: 1 | -1) {
+    if (!this.ended && this.socket.connected) this.socket.emit('observe:step', dir);
   }
 
   // ---------------------------------------------------------------- input
@@ -279,6 +336,11 @@ export class GameSession {
       if (e.repeat) return;
       this.keys.add(code);
       if (this.hud.blocking) return;
+      if (this.observer) {
+        if (code === 'ArrowLeft' || code === 'KeyA') this.observeStep(-1);
+        else if (code === 'ArrowRight' || code === 'KeyD') this.observeStep(1);
+        return;
+      }
       switch (code) {
         case 'KeyR': this.action({ t: 'reload' }); break;
         case 'KeyF': this.action({ t: 'interact' }); break;
@@ -307,6 +369,18 @@ export class GameSession {
       unlockAudio();
       if (e.button !== 0 || (e.target as HTMLElement).tagName !== 'CANVAS') return;
       this.mouse.down = true;
+    });
+    // mousedown rather than pointerdown: a second button pressed while firing does not start a new pointer
+    this.listen(window, 'mousedown', (e) => {
+      if (e.button === 1 && e.target === this.game.canvas) {
+        // also stops the browser's middle-click autoscroll
+        e.preventDefault();
+        if (this.hud.current === 'none') this.markAtCursor();
+        return;
+      }
+      if (e.button !== 2 || (e.target as HTMLElement).tagName !== 'CANVAS') return;
+      const pick = this.mousePickTarget();
+      if (pick) this.action({ t: 'pickup', id: pick.loot[0] });
     });
     this.listen(window, 'pointerup', (e) => {
       if (e.button === 0) this.mouse.down = false;
@@ -354,7 +428,7 @@ export class GameSession {
     const me = this.me;
     if (!me || !me.alive || this.spectating) return;
     const owned = SCOPE_LEVELS.filter((s) => me.scopes.includes(s));
-    if (owned.length < 2) return this.hud.center('Bạn chưa có ống nhắm nào khác', 1200);
+    if (owned.length < 2) return this.hud.center('Bạn chưa thuần phục chim nào khác', 1200);
     const idx = owned.indexOf(this.viewScope as (typeof owned)[number]);
     this.selectScope(owned[(idx + 1) % owned.length]);
   }
@@ -374,9 +448,41 @@ export class GameSession {
     this.touch?.setScopeLabel(level);
   }
 
+  private get ownMarker(): MarkerNet | undefined {
+    return this.markers.find((m) => m[0] === this.you);
+  }
+
+  private mark(at: { x: number; y: number } | null) {
+    if (at ? !this.action({ t: 'mark', x: Math.round(at.x), y: Math.round(at.y) }) : !this.action({ t: 'unmark' })) return;
+    sfx.mark(!at);
+  }
+
+  /** Middle click: a banner where the cursor points, or takes down the one already there. */
+  private markAtCursor() {
+    const at = this.cursorWorld();
+    if (!at) return;
+    const own = this.ownMarker;
+    const hit = Math.max(40, 24 / this.scene!.cameras.main.zoom);
+    this.mark(own && Math.hypot(own[1] - at.x, own[2] - at.y) <= hit ? null : at);
+  }
+
+  /** A teammate planting or moving their banner gets a chime and a line in the feed. */
+  private trackMarkers(list: MarkerNet[]) {
+    const spots = new Map(list.map(([pid, x, y]) => [pid, `${x},${y}`]));
+    const before = this.markerSpots;
+    this.markerSpots = spots;
+    if (!before) return;
+    for (const [pid, spot] of spots) {
+      if (pid === this.you || before.get(pid) === spot) continue;
+      const color = this.mates.get(pid);
+      this.hud.feed(`🚩 <b${color ? ` style="color:${color}"` : ''}>${nameHtml(this.nameOf(pid), this.isAdmin(pid), false)}</b> vừa cắm cờ trên bản đồ`);
+      sfx.mark();
+    }
+  }
+
   private action(msg: ActionMsg): boolean {
     // socket.io would queue it and replay it after reconnecting, long after the player meant it
-    if (this.ended || !this.socket.connected) return false;
+    if (this.observer || this.ended || !this.socket.connected) return false;
     this.socket.emit('action', msg);
     return true;
   }
@@ -443,10 +549,8 @@ export class GameSession {
         if (this.keys.has('KeyD') || this.keys.has('ArrowRight')) mx += 1;
         fire = this.mouse.down;
       }
-      const cam = this.scene?.cameras.main;
-      if (cam) {
-        const dpr = this.game.scale.width / window.innerWidth;
-        const world = cam.getWorldPoint(this.mouse.x * dpr, this.mouse.y * dpr);
+      const world = this.cursorWorld();
+      if (world) {
         const vx = this.pred.x + this.predOffset.x;
         const vy = this.pred.y + this.predOffset.y;
         this.aimAngle = Math.atan2(world.y - vy, world.x - vx);
@@ -462,9 +566,59 @@ export class GameSession {
     const input: InputMsg = { s: ++this.seq, mx, my, a: this.aimAngle, f: fire, td: Math.min(td, THROWABLE.maxDistance) };
     this.socket.emit('input', input);
     const speed = playerSpeed(this.activeWeapon(me), me.healLeft > 0);
-    this.pred = stepMovement(this.world, this.pred.x, this.pred.y, mx, my, speed, TICK_S);
+    this.pred = stepMovement(this.world, this.pred.x, this.pred.y, mx, my, speed, TICK_S, this.bounds);
     this.pending.push(input);
     if (this.pending.length > 90) this.pending.shift();
+  }
+
+  private cursorWorld(): { x: number; y: number } | null {
+    const cam = this.scene?.cameras.main;
+    if (!cam) return null;
+    const dpr = this.game.scale.width / window.innerWidth;
+    return cam.getWorldPoint(this.mouse.x * dpr, this.mouse.y * dpr);
+  }
+
+  /** Items the player can pick up right now: in reach and not behind a wall. */
+  lootInReach(): LootNet[] {
+    const me = this.me;
+    if (!me || !me.alive || this.spectating || this.lobby) return [];
+    const { x, y } = this.viewPosition();
+    const out: LootNet[] = [];
+    for (const l of this.loot.values()) {
+      if (Math.hypot(l[2] - x, l[3] - y) <= PICKUP_RANGE && this.world.lineClear(x, y, l[2], l[3])) out.push(l);
+    }
+    return out;
+  }
+
+  /**
+   * What a right click picks up: the item under the mouse, otherwise the nearest one in reach.
+   * `hovered` tells the prompt which of the two it is.
+   */
+  private mousePickTarget(): { loot: LootNet; hovered: boolean } | null {
+    if (this.touch || this.hud.current !== 'none' || this.hud.isDead) return null;
+    const reach = this.lootInReach();
+    if (!reach.length) return null;
+    const cursor = this.cursorWorld();
+    if (cursor) {
+      // the icon is 34 units wide; zoomed far out it is padded so it stays clickable on screen
+      const hitRadius = Math.max(24, 16 / this.scene!.cameras.main.zoom);
+      let best: { l: LootNet; d: number } | null = null;
+      for (const l of reach) {
+        const d = Math.hypot(l[2] - cursor.x, l[3] - cursor.y);
+        if (d <= hitRadius && (!best || d < best.d)) best = { l, d };
+      }
+      if (best) return { loot: best.l, hovered: true };
+    }
+    const { x, y } = this.viewPosition();
+    const dist = (l: LootNet) => Math.hypot(l[2] - x, l[3] - y);
+    return { loot: reach.reduce((a, b) => (dist(b) < dist(a) ? b : a)), hovered: false };
+  }
+
+  private lootLabel(me: SelfNet, [, item, , , amount]: LootNet): string {
+    const def = ITEMS[item];
+    if (def.kind === 'scope' && me.scopes.includes(scopeOfItem(item))) return `Đã có ${def.name}`;
+    const verb = def.kind === 'scope' ? 'Thuần phục' : 'Nhặt';
+    return `${verb} ${def.name}${def.kind === 'ammo' ? ` ×${amount}` : ''}`;
   }
 
   private updatePrompt() {
@@ -477,15 +631,16 @@ export class GameSession {
       this.touch?.setInteractLabel(null);
       return;
     }
+    const pick = this.mousePickTarget();
+    if (pick?.hovered) {
+      this.hud.prompt(`<span class="kbd">Chuột phải</span> ${esc(this.lootLabel(me, pick.loot))}`);
+      return;
+    }
     const { x, y } = this.viewPosition();
-    let best: { d: number; text: string } | null = null;
-    for (const [, item, lx, ly, amount] of this.loot.values()) {
-      const d = Math.hypot(lx - x, ly - y);
-      if (d <= PICKUP_RANGE && (!best || d < best.d)) {
-        const def = ITEMS[item];
-        const owned = def.kind === 'scope' && me.scopes.includes(scopeOfItem(item));
-        best = { d, text: owned ? `Đã có ${def.name}` : `Nhặt ${def.name}${def.kind === 'ammo' ? ` ×${amount}` : ''}` };
-      }
+    let best: { d: number; text: string; loot?: boolean } | null = null;
+    for (const l of this.lootInReach()) {
+      const d = Math.hypot(l[2] - x, l[3] - y);
+      if (!best || d < best.d) best = { d, text: this.lootLabel(me, l), loot: true };
     }
     for (const door of this.map.doors) {
       const d = Math.hypot(door.x + door.w / 2 - x, door.y + door.h / 2 - y) + 10;
@@ -496,7 +651,8 @@ export class GameSession {
       if (landed && d <= INTERACT_RANGE + AIRDROP_SIZE / 2 && (!best || d < best.d)) best = { d, text: 'Mở thính' };
     }
     const label = best ? best.text : null;
-    this.hud.prompt(label ? `${this.touch ? '' : '<span class="kbd">F</span> '}${esc(label)}` : null);
+    const keys = this.touch ? '' : best?.loot ? '<span class="kbd">F</span> / <span class="kbd">Chuột phải</span> ' : '<span class="kbd">F</span> ';
+    this.hud.prompt(label ? `${keys}${esc(label)}` : null);
     this.touch?.setInteractLabel(label);
   }
 
@@ -514,6 +670,15 @@ export class GameSession {
     this.throwables = snap.g;
     this.airdrops = snap.ad;
     this.alive = snap.alive;
+    this.lobby = snap.lb ?? null;
+    this.hud.setLobby(this.lobby);
+    this.markers = snap.mk ?? [];
+    this.trackMarkers(this.markers);
+    if (snap.b) {
+      this.boars = snap.b;
+      this.boarsAt = snap.t;
+    }
+    if (snap.tr) this.hud.setTrainingStats(snap.tr);
 
     const players = new Map<number, PlayerNet>();
     for (const p of snap.p) players.set(p[0], p);
@@ -537,7 +702,7 @@ export class GameSession {
 
     this.flushToScene();
     const pos = this.viewPosition();
-    this.hud.update(snap.me, snap.alive, snap.z, snap.ad, snap.spectating, pos.x, pos.y);
+    this.hud.update(snap.me, snap.alive, snap.z, snap.ad, snap.spectating, pos.x, pos.y, snap.tm ? { mates: snap.tm, teams: snap.teams ?? 0 } : null, this.markers);
     this.syncScopeHud();
   };
 
@@ -553,7 +718,7 @@ export class GameSession {
     }
     const speed = playerSpeed(this.activeWeapon(me), me.healLeft > 0);
     let pos = { x: me.x, y: me.y };
-    for (const input of this.pending) pos = stepMovement(this.world, pos.x, pos.y, input.mx, input.my, speed, TICK_S);
+    for (const input of this.pending) pos = stepMovement(this.world, pos.x, pos.y, input.mx, input.my, speed, TICK_S, this.bounds);
     const ex = this.pred.x - pos.x;
     const ey = this.pred.y - pos.y;
     const err = Math.hypot(ex, ey);
@@ -590,7 +755,9 @@ export class GameSession {
         break;
       case 'kill':
         this.hud.killFeed(e.killer, e.victim, e.w);
-        if (e.killer === this.you && e.victim !== this.you) {
+        if (e.w === 'kick') {
+          this.hud.center(`🚫 ${this.nameOf(e.victim)} đã bị admin kích khỏi map`, 4000);
+        } else if (e.killer === this.you && e.victim !== this.you) {
           this.hud.center(`Bạn đã hạ gục ${this.nameOf(e.victim)} bằng ${weaponName(e.w)}`);
           sfx.kill();
         }
@@ -599,19 +766,27 @@ export class GameSession {
         this.hud.hurt();
         sfx.hurt();
         break;
-      case 'pickup': {
-        const def = ITEMS[e.item];
-        // the server just switched to the new scope; a stale local choice must not override it
-        if (def.kind === 'scope') this.pendingScope = null;
-        this.hud.feed(`Đã nhặt <b>${esc(def.name)}</b>${def.kind === 'ammo' ? ` ×${e.amount}` : ''}`);
+      case 'pickup':
+        // the server switches only to a stronger scope; then a stale local choice must not override it
+        if (ITEMS[e.item].kind === 'scope') {
+          if (this.pendingScope && scopeOfItem(e.item) > this.pendingScope.level) this.pendingScope = null;
+          this.hud.center(`Đã thuần phục ${ITEMS[e.item].name}, tầm nhìn x${scopeOfItem(e.item)}`, 1800);
+        }
         sfx.pickup(e.item);
         break;
-      }
       case 'notice':
         this.hud.center(e.text);
         break;
       case 'airdrop':
         this.hud.center('📦 Thính sắp rơi! Xem vị trí trên bản đồ (M).', 4000);
+        sfx.alert();
+        break;
+      case 'boarDown':
+        this.hud.center(`🐗 Hạ lợn rừng ở khoảng cách ${e.d}`, 1400);
+        sfx.kill();
+        break;
+      case 'go':
+        this.hud.center('⚔️ Trận đấu bắt đầu! Nhặt đồ và trụ lại đến cuối cùng.', 3000);
         sfx.alert();
         break;
     }
@@ -620,7 +795,7 @@ export class GameSession {
   private onDead = (msg: DeathMsg) => {
     // the server repeats match:dead after a reconnect; don't pull a spectator back to the death screen
     if (this.ended || this.hud.isDead) return;
-    const killerAlive = msg.killer >= 0 && msg.killer !== this.you;
+    const killerAlive = !msg.teamAlive && msg.killer >= 0 && msg.killer !== this.you && !this.mates.has(msg.killer);
     this.hud.showDeath(msg, killerAlive);
     this.syncTouchMode();
   };
@@ -636,7 +811,7 @@ export class GameSession {
 
   private leave() {
     if (this.ended) return this.exit();
-    this.socket.emit('match:leave');
+    this.socket.emit(this.observer ? 'observe:stop' : 'match:leave');
     window.setTimeout(() => this.exit(), 1500);
   }
 
@@ -658,7 +833,12 @@ export class GameSession {
   }
 
   private renderTime(): number {
-    return performance.now() + (this.serverOffset ?? 0) - INTERPOLATION_DELAY_MS;
+    return this.serverTime() - INTERPOLATION_DELAY_MS;
+  }
+
+  /** Best estimate of the server clock right now (as of the fastest snapshot seen). */
+  serverTime(): number {
+    return performance.now() + (this.serverOffset ?? 0);
   }
 
   private interpolate(pid: number): RenderPlayer | null {
@@ -673,7 +853,9 @@ export class GameSession {
     if (!pb) return null;
     const pa = a.players.get(pid) ?? pb;
     const span = b.t - a.t;
-    const k = span > 0 ? Math.min(1, Math.max(0, (t - a.t) / span)) : 1;
+    // a jump no one could run (leaving the waiting area) snaps instead of sliding across the map
+    const teleported = Math.hypot(pb[1] - pa[1], pb[2] - pa[2]) > 300;
+    const k = span > 0 && !teleported ? Math.min(1, Math.max(0, (t - a.t) / span)) : 1;
     return {
       pid,
       x: pa[1] + (pb[1] - pa[1]) * k,

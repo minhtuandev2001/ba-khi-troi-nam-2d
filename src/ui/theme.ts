@@ -114,10 +114,23 @@ const MOTIF = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="16" vi
 
 const svgUrl = (svg: string) => `url("data:image/svg+xml,${encodeURIComponent(svg.replace(/\s+/g, ' '))}")`;
 
+/** Bronze corner flourish for card frames, drawn for the top-left corner and rotated for the others. */
+function corner(rotate: number) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 26 26">
+  <g transform="rotate(${rotate} 13 13)" fill="none" stroke="#ffe2a0" stroke-width="2" stroke-linecap="round" opacity="0.9">
+    <path d="M3 22V8Q3 3 8 3H22"/><path d="M8 14V10Q8 8 10 8H14"/>
+    <circle cx="13" cy="13" r="1.8" fill="#ffe2a0" stroke="none"/>
+  </g></svg>`;
+}
+
 export function applyTheme() {
   const root = document.documentElement.style;
   root.setProperty('--landscape', svgUrl(landscape()));
   root.setProperty('--motif', svgUrl(MOTIF));
+  root.setProperty('--corner-tl', svgUrl(corner(0)));
+  root.setProperty('--corner-tr', svgUrl(corner(90)));
+  root.setProperty('--corner-br', svgUrl(corner(180)));
+  root.setProperty('--corner-bl', svgUrl(corner(270)));
 }
 
 const icon = (body: string) => `<svg viewBox="0 0 64 64" width="56" height="56" aria-hidden="true">${body}</svg>`;
@@ -147,4 +160,13 @@ export const MODE_ICONS = {
     <rect x="28" y="28" width="8" height="11" fill="#4a2a12"/>
     <path d="M2 12Q8 20 12 24Q32 28 54 24Q58 20 62 12Q56 18 50 18Q32 2 14 18Q8 18 2 12Z" fill="#7a4a22" stroke="#3a200c" stroke-width="2" stroke-linejoin="round"/>
     <path d="M44 42L52 60M50 42L58 60" stroke="#6b4220" stroke-width="2.5"/>`),
+  /** straw target on a wooden stand */
+  training: icon(`
+    <path d="M20 44L12 62M44 44L52 62M32 46V62" stroke="#6b4220" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="32" cy="28" r="22" fill="#e8c878" stroke="#6b4220" stroke-width="3"/>
+    <circle cx="32" cy="28" r="15" fill="#b8402a" stroke="#6b4220" stroke-width="2"/>
+    <circle cx="32" cy="28" r="9" fill="#efd796" stroke="#6b4220" stroke-width="2"/>
+    <circle cx="32" cy="28" r="4" fill="#b8402a"/>
+    <path d="M56 6L34 26" stroke="#4a2a12" stroke-width="3" stroke-linecap="round"/>
+    <path d="M56 6l-8 1M56 6l-1 8" stroke="#c07a2a" stroke-width="3" stroke-linecap="round"/>`),
 };

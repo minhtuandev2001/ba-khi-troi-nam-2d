@@ -1,4 +1,5 @@
 import { io, type Socket } from 'socket.io-client';
+import * as msgpackParser from 'socket.io-msgpack-parser';
 import { API_URL, getToken } from './api';
 
 let socket: Socket | null = null;
@@ -7,6 +8,7 @@ export function connectSocket(): Socket {
   if (socket) return socket;
   socket = io(API_URL || undefined, {
     auth: (cb) => cb({ token: getToken() }),
+    parser: msgpackParser,
     transports: ['websocket', 'polling'],
     reconnection: true,
     reconnectionDelay: 800,

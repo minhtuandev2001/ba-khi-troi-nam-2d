@@ -4,16 +4,29 @@ import {
   CHEST_SIZE,
   DOOR_WIDTH,
   ITEMS,
-  MAP_SIZE,
+  MAP_DEFS,
   PLAYER_RADIUS,
   SCOPE_VIEW_MULTIPLIER,
   WALL_THICKNESS,
   WEAPONS,
   angleDiff,
   doorOutward,
+  muzzleDistance,
   roomAt,
   PFLAG_DISCONNECTED,
   PFLAG_HEALING,
+  BOAR_RADIUS,
+  FIRING_LINE_X,
+  LANE_Y0,
+  LANE_Y1,
+  RACK_ITEMS,
+  RACK_STEP,
+  RACK_X,
+  RACK_Y0,
+  RANGE_BOUNDS,
+  TRAINING_LANES,
+  TRAINING_MAP,
+  laneX,
   type ArmorLevel,
   type BagLevel,
   type Door,
@@ -28,15 +41,41 @@ import { settings } from '../settings';
 import { sfx, spotAt, startAmbient, stopAmbient } from './audio';
 import { RARITY_COLOR, iconImages, iconTextureKey, rarityOf } from './icons';
 import type { GameSession } from './session';
-import { CHEST_BODY, PROP_RADIUS, TEX, TRUNK_RADIUS, makeWorldTextures } from './worldArt';
+import { OWN_MARKER_COLOR, cssToNumber } from './team';
+import { BOAR_BODY, CHEST_BODY, HELD_H, HELD_W, PROP_RADIUS, TEX, TRUNK_RADIUS, makeWorldTextures, tileScale, worldResolution } from './worldArt';
 
-const ARMOR_COLORS = [0, 0xc9d6e0, 0x3fa3ff, 0x2b2f6b];
-const BAG_COLORS = [0, 0xc98a3d, 0x4fae3a, 0x8a4fd6];
+/** Rattan, buffalo hide and Đông Sơn bronze. */
+const ARMOR_COLORS = [0, 0xdcb878, 0x9a6234, 0xe3ac30];
+/** Gùi baskets from plain bamboo to the dark patterned one. */
+const BAG_COLORS = [0, 0xe3b56e, 0xb8793a, 0x8a4a22];
+
+/** Texture and hand positions (relative to the player's centre, facing +x) of each ranged weapon. */
+const HOLD: Partial<Record<WeaponId, { tex: string; hands: [number, number, number, number] }>> = {
+  pistol: { tex: TEX.heldBlowpipe, hands: [24, -4, 36, 4] },
+  rifle: { tex: TEX.heldBow, hands: [36, -2, 17, 3] },
+  shotgun: { tex: TEX.heldCrossbow, hands: [38, -5, 21, 5] },
+  sniper: { tex: TEX.heldDivineBow, hands: [44, -2, 19, 3] },
+};
+
+/** How each projectile looks in flight: shaft length, thickness and colours. */
+const PROJECTILE: Partial<Record<WeaponId, { len: number; w: number; shaft: number; head: number; fletch: number; trail: number }>> = {
+  pistol: { len: 12, w: 1.6, shaft: 0xe8cf8a, head: 0x8a96a3, fletch: 0xfffaf0, trail: 0xfff6dc },
+  rifle: { len: 26, w: 2.4, shaft: 0xc89a5a, head: 0xc8963e, fletch: 0xf2e6cc, trail: 0xfff1c8 },
+  shotgun: { len: 16, w: 2.2, shaft: 0x8a5a2b, head: 0xd4a02a, fletch: 0xf2e6cc, trail: 0xfff1c8 },
+  sniper: { len: 34, w: 3, shaft: 0xffd34a, head: 0xffc21a, fletch: 0xff5a4a, trail: 0xffe27a },
+};
+
 const ZOOM_EASE_MS = 90;
 const DOOR_WOOD = 0xc77a3a;
 const DOOR_FRAME = 0x5a3010;
 const DOOR_GAP = 0x3b2410;
 const SKIN = 0xf0c08a;
+const HAND_X = 14;
+const HAND_Y = 16;
+const PUNCH_MS = 160;
+const SLASH_MS = 320;
+const KNIFE_GRIP = Math.atan2(HAND_Y, HAND_X);
+const KNIFE_REACH = Math.hypot(HAND_X, HAND_Y);
 
 const OUTLINE = 0x2a1a0e;
 const BAMBOO_WALL = 0xb98d52;
@@ -46,6 +85,9 @@ const DARK_WOOD = 0x5a3a18;
 const TREE_KINDS = ['bamboo', 'bamboo', 'areca', 'banana', 'areca', 'bamboo', 'banana', 'areca', 'bamboo', 'banana'] as const;
 /** Small rocks read better as clay jars; big ones stay limestone boulders. */
 const JAR_MAX_RADIUS = 42;
+/** World width of the boar's body; its hit circle is a bit wider so shots on the flank count. */
+const BOAR_WIDTH = BOAR_RADIUS * 1.3;
+const BOAR_BAR_W = 46;
 
 /** Maps (along, across) offsets relative to an anchor, where `along` follows the unit vector (dx, dy). */
 function axis(x: number, y: number, dx: number, dy: number) {
@@ -106,6 +148,7 @@ function drawGableHorns(g: Phaser.GameObjects.Graphics, x: number, y: number, dx
   }
 }
 
+/** An arrow, bolt or dart flying from the shooter's weapon tip (as drawn) to where the shot really stops. */
 interface Tracer {
   id: number;
   x: number;
@@ -113,10 +156,9 @@ interface Tracer {
   dx: number;
   dy: number;
   speed: number;
-  maxDist: number;
+  len: number;
   born: number;
-  width: number;
-  color: number;
+  w: WeaponId;
 }
 
 class PlayerView {
@@ -128,31 +170,41 @@ class PlayerView {
   private readonly handL: Phaser.GameObjects.Arc;
   private readonly handR: Phaser.GameObjects.Arc;
   private readonly gun: Phaser.GameObjects.Rectangle;
+  private readonly held: Phaser.GameObjects.Image;
   private readonly healRing: Phaser.GameObjects.Arc;
   private weapon: WeaponId | null = null;
   private armor: ArmorLevel = 0;
   private bagLevel: BagLevel = 0;
   lastSeen = 0;
   private punching = 0;
+  private punchMs = PUNCH_MS;
+  private punchLeft = true;
 
-  constructor(scene: Phaser.Scene, readonly pid: number, name: string | null, isSelf: boolean) {
+  constructor(scene: Phaser.Scene, readonly pid: number, name: string | null, isSelf: boolean, textResolution: number, mateColor: string | null = null, admin = false) {
     this.bag = scene.add.circle(-16, 0, 13, 0x000000).setVisible(false);
     this.gun = scene.add.rectangle(30, 0, 40, 7, 0x333333).setOrigin(0, 0.5).setStrokeStyle(2, OUTLINE);
+    this.held = scene.add.image(0, 0, TEX.heldBow).setOrigin(0, 0.5).setDisplaySize(HELD_W, HELD_H).setVisible(false);
     this.handL = scene.add.circle(14, -16, 7, SKIN).setStrokeStyle(2.5, OUTLINE);
     this.handR = scene.add.circle(14, 16, 7, SKIN).setStrokeStyle(2.5, OUTLINE);
-    this.body = scene.add.circle(0, 0, PLAYER_RADIUS, SKIN).setStrokeStyle(isSelf ? 4 : 3, isSelf ? 0xffc21a : OUTLINE);
+    const ring = isSelf ? 0xffc21a : mateColor ? cssToNumber(mateColor) : OUTLINE;
+    this.body = scene.add.circle(0, 0, PLAYER_RADIUS, SKIN).setStrokeStyle(isSelf || mateColor ? 4 : 3, ring);
     this.armorRing = scene.add.circle(0, 0, PLAYER_RADIUS - 5).setStrokeStyle(5, 0x000000).setVisible(false);
     this.healRing = scene.add.circle(0, 0, PLAYER_RADIUS + 6).setStrokeStyle(3, 0x5cff7a, 0.8).setVisible(false);
     // Đông Sơn feather headdress fanning out behind the head; it also shows which way the player faces
     const plume = scene.add.image(-PLAYER_RADIUS + 8, 0, TEX.plume).setOrigin(1, 0.5).setDisplaySize(30, 30);
-    this.container = scene.add.container(0, 0, [plume, this.bag, this.gun, this.handL, this.handR, this.body, this.armorRing, this.healRing]);
+    this.container = scene.add.container(0, 0, [plume, this.bag, this.gun, this.held, this.handL, this.handR, this.body, this.armorRing, this.healRing]);
     this.container.setDepth(10);
     this.label = name
       ? scene.add
-          .text(0, 0, name, { fontFamily: "'Baloo 2', sans-serif", fontSize: '15px', fontStyle: 'bold', color: isSelf ? '#ffe066' : '#ffffff', stroke: '#2a1a0e', strokeThickness: 4 })
+          .text(0, 0, admin ? `★ ${name} ★` : name, {
+            fontFamily: "'Baloo 2', sans-serif", fontSize: admin ? '16px' : '15px', fontStyle: 'bold',
+            color: isSelf ? '#ffe066' : (mateColor ?? (admin ? '#ffc23d' : '#ffffff')),
+            stroke: admin ? '#5c1504' : '#2a1a0e', strokeThickness: 4, resolution: textResolution,
+          })
           .setOrigin(0.5, 1)
           .setDepth(60)
       : null;
+    if (admin) this.label?.setShadow(0, 0, '#ff8a1f', 8, true, false);
   }
 
   update(x: number, y: number, a: number, weapon: WeaponId, armor: ArmorLevel, bag: BagLevel, flags: number, dt: number) {
@@ -173,42 +225,69 @@ class PlayerView {
     this.container.setAlpha(alpha);
     if (this.punching > 0) {
       this.punching = Math.max(0, this.punching - dt);
-      const k = Math.sin((1 - this.punching / 160) * Math.PI);
-      const melee = weapon === 'fists' || weapon === 'knife';
-      if (melee) this.handR.x = 14 + k * 18;
+      const t = 1 - this.punching / this.punchMs;
+      if (weapon === 'fists') this.animatePunch(t);
+      else if (weapon === 'knife') this.animateSlash(t);
     }
+  }
+
+  /** Jab with one hand; hands alternate between punches. */
+  private animatePunch(t: number) {
+    const k = Math.sin(t * Math.PI);
+    const side = this.punchLeft ? -1 : 1;
+    const hand = this.punchLeft ? this.handL : this.handR;
+    hand.setPosition(HAND_X + k * 18, side * HAND_Y * (1 - 0.5 * k));
+  }
+
+  /** Fan the knife across the front (right → left → right) along an arc around the body. */
+  private animateSlash(t: number) {
+    const k = Math.sin(t * Math.PI);
+    const a = KNIFE_GRIP * Math.cos(t * Math.PI * 2);
+    const r = KNIFE_REACH + 6 * k;
+    const hx = Math.cos(a) * r;
+    const hy = Math.sin(a) * r;
+    const blade = a * Math.min(1, k * 3);
+    this.handR.setPosition(hx, hy);
+    this.gun.setPosition(hx + Math.cos(blade) * 4, hy + Math.sin(blade) * 4).setRotation(blade);
+    this.handL.setPosition(HAND_X - 8 * k, -HAND_Y - 3 * k);
   }
 
   private setWeapon(w: WeaponId) {
     this.weapon = w;
     const def = WEAPONS[w];
-    if (def.slot === 'melee') {
-      this.handL.setPosition(14, -16);
-      this.handR.setPosition(14, 16);
-      if (w === 'knife') {
-        this.gun.setVisible(true).setPosition(18, 16).setSize(22, 4).setFillStyle(def.color);
-      } else {
-        this.gun.setVisible(false);
-      }
+    this.gun.setRotation(0);
+    const hold = HOLD[w];
+    this.held.setVisible(!!hold);
+    if (hold) {
+      this.gun.setVisible(false);
+      this.held.setTexture(hold.tex).setDisplaySize(HELD_W, HELD_H);
+      const [lx, ly, rx, ry] = hold.hands;
+      this.handL.setPosition(lx, ly);
+      this.handR.setPosition(rx, ry);
       return;
     }
-    const length = w === 'pistol' ? 22 : w === 'shotgun' ? 42 : w === 'sniper' ? 62 : 48;
-    this.gun.setVisible(true).setPosition(16, 0).setSize(length, w === 'pistol' ? 7 : 8).setFillStyle(def.color);
-    if (w === 'pistol') {
-      this.handL.setPosition(22, -3);
-      this.handR.setPosition(22, 3);
+    this.handL.setPosition(HAND_X, -HAND_Y);
+    this.handR.setPosition(HAND_X, HAND_Y);
+    if (w === 'knife') {
+      this.gun.setVisible(true).setPosition(HAND_X + 4, HAND_Y).setSize(22, 4).setFillStyle(def.color);
     } else {
-      this.handL.setPosition(20, 5);
-      this.handR.setPosition(16 + length * 0.6, -3);
+      this.gun.setVisible(false);
     }
   }
 
   punch() {
-    this.punching = 160;
+    if (this.weapon === 'fists') {
+      this.handL.setPosition(HAND_X, -HAND_Y);
+      this.handR.setPosition(HAND_X, HAND_Y);
+      this.punchLeft = !this.punchLeft;
+    }
+    this.punchMs = this.weapon === 'knife' ? SLASH_MS : PUNCH_MS;
+    this.punching = this.punchMs;
   }
 
-  muzzle(): { x: number; y: number } {
-    const len = this.weapon && WEAPONS[this.weapon].slot !== 'melee' ? 16 + this.gun.width : PLAYER_RADIUS;
+  /** Muzzle of the gun `w` as this player is currently drawn; `maxDist` keeps it from poking past a wall. */
+  muzzle(w: WeaponId, maxDist = Infinity): { x: number; y: number } {
+    const len = Math.min(muzzleDistance(w) || PLAYER_RADIUS, maxDist);
     return {
       x: this.container.x + Math.cos(this.container.rotation) * len,
       y: this.container.y + Math.sin(this.container.rotation) * len,
@@ -230,36 +309,43 @@ export class GameScene extends Phaser.Scene {
   private cullables: { obj: Phaser.GameObjects.Graphics | Phaser.GameObjects.Container; x0: number; y0: number; x1: number; y1: number }[] = [];
   private doorMarks = new Map<number, Phaser.GameObjects.Rectangle[]>();
   private canopies: { img: Phaser.GameObjects.Image; x: number; y: number; r: number }[] = [];
-  private throwViews = new Map<number, Phaser.GameObjects.Arc>();
+  private throwViews = new Map<number, Phaser.GameObjects.Image>();
   private smokeViews = new Map<number, Phaser.GameObjects.Arc>();
   private airdropViews = new Map<number, Phaser.GameObjects.Container>();
+  private boarViews = new Map<number, { cont: Phaser.GameObjects.Container; body: Phaser.GameObjects.Image; bar: Phaser.GameObjects.Rectangle; facing: number }>();
+  private readonly training: boolean;
   private tracers: Tracer[] = [];
   private tracerGfx!: Phaser.GameObjects.Graphics;
   private zoneGfx!: Phaser.GameObjects.Graphics;
+  private markerGfx!: Phaser.GameObjects.Graphics;
   private currentZoom = 1;
+  private textResolution = 1;
   private fpsTimer = 0;
   private lastStepPos = { x: 0, y: 0 };
   private stepDistance = 0;
 
   constructor(private readonly session: GameSession) {
     super({ key: 'game' });
+    this.training = session.map.id === TRAINING_MAP;
   }
 
   create() {
     makeWorldTextures(this);
+    this.textResolution = worldResolution(this);
     const map = this.session.map;
     this.cameras.main.setBackgroundColor('#2c6a66');
 
     // the island sits in a jade river with an alluvial bank
     const shore = this.add.graphics().setDepth(-1);
     shore.fillStyle(0x3f8a7e, 1);
-    shore.fillRoundedRect(-150, -150, MAP_SIZE + 300, MAP_SIZE + 300, 160);
+    shore.fillRoundedRect(-150, -150, map.size + 300, map.size + 300, 160);
     shore.fillStyle(0xd2b077, 1);
-    shore.fillRoundedRect(-80, -80, MAP_SIZE + 160, MAP_SIZE + 160, 90);
+    shore.fillRoundedRect(-80, -80, map.size + 160, map.size + 160, 90);
     shore.fillStyle(0xb89458, 0.6);
-    shore.fillRoundedRect(-30, -30, MAP_SIZE + 60, MAP_SIZE + 60, 60);
+    shore.fillRoundedRect(-30, -30, map.size + 60, map.size + 60, 60);
 
-    this.add.tileSprite(0, 0, MAP_SIZE, MAP_SIZE, TEX.grass).setOrigin(0, 0).setDepth(0);
+    this.add.tileSprite(0, 0, map.size, map.size, TEX.grass).setOrigin(0, 0).setTileScale(tileScale(this, TEX.grass))
+      .setTint(MAP_DEFS[map.id].theme.grassTint).setDepth(0);
 
     // Phaser re-tessellates every Graphics each frame, so static vector art is split per object and culled offscreen
     for (const d of map.decor) {
@@ -270,10 +356,10 @@ export class GameScene extends Phaser.Scene {
     }
     const border = this.add.graphics().setDepth(1);
     border.lineStyle(8, 0x5f6a2c, 1);
-    border.strokeRect(0, 0, MAP_SIZE, MAP_SIZE);
+    border.strokeRect(0, 0, map.size, map.size);
 
     for (const h of map.houses) {
-      this.add.tileSprite(h.x + h.w / 2, h.y + h.h / 2, h.w, h.h, TEX.slats).setTint(h.floor).setDepth(2);
+      this.add.tileSprite(h.x + h.w / 2, h.y + h.h / 2, h.w, h.h, TEX.slats).setTileScale(tileScale(this, TEX.slats)).setTint(h.floor).setDepth(2);
     }
 
     for (const h of map.houses) {
@@ -299,7 +385,7 @@ export class GameScene extends Phaser.Scene {
       if (w.houseId >= 0) continue;
       const vertical = w.h > w.w;
       const thick = vertical ? w.w : w.h;
-      const stakes = this.add.tileSprite(w.x + w.w / 2, w.y + w.h / 2, vertical ? w.h : w.w, thick, TEX.stakes).setTileScale(thick / 32).setDepth(5);
+      const stakes = this.add.tileSprite(w.x + w.w / 2, w.y + w.h / 2, vertical ? w.h : w.w, thick, TEX.stakes).setTileScale(tileScale(this, TEX.stakes, thick)).setDepth(5);
       if (vertical) stakes.setAngle(90);
     }
     for (const r of map.rocks) {
@@ -362,8 +448,10 @@ export class GameScene extends Phaser.Scene {
       this.setDoor(d.id, this.session.world.doorOpen[d.id]);
     }
 
+    if (this.training) this.buildRange();
     this.tracerGfx = this.add.graphics().setDepth(12);
     this.zoneGfx = this.add.graphics().setDepth(50);
+    this.markerGfx = this.add.graphics().setDepth(55);
 
     this.scale.on('resize', (size: Phaser.Structs.Size) => {
       this.cameras.main.setSize(size.width, size.height);
@@ -374,6 +462,56 @@ export class GameScene extends Phaser.Scene {
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, stopAmbient);
     this.events.once(Phaser.Scenes.Events.DESTROY, stopAmbient);
     this.session.onSceneReady(this);
+  }
+
+  /** Chalk firing line, wooden weapon rack and a distance board at both ends of every lane. */
+  private buildRange() {
+    const { y0, y1 } = RANGE_BOUNDS;
+    // the range hugs the west edge of the map, so the camera stops at the edge instead of centring on the sea
+    this.cameras.main.setBounds(0, 0, this.session.map.size, this.session.map.size);
+    const g = this.add.graphics().setDepth(1.5);
+    g.fillStyle(0xd8c08a, 0.5);
+    g.fillRect(FIRING_LINE_X - 34, y0 + 20, 68, y1 - y0 - 40);
+    g.fillStyle(0xa07a4a, 0.35);
+    for (const lane of TRAINING_LANES) g.fillRoundedRect(laneX(lane) - 40, LANE_Y0 - 34, 80, LANE_Y1 - LANE_Y0 + 68, 34);
+    g.fillStyle(0xf4ecd2, 0.85);
+    for (let y = y0 + 40; y < y1 - 40; y += 36) g.fillRect(FIRING_LINE_X - 3, y, 6, 22);
+    g.lineStyle(2, 0xf4ecd2, 0.35);
+    for (const lane of TRAINING_LANES) {
+      const x = laneX(lane);
+      g.lineBetween(x, LANE_Y0 - 20, x, LANE_Y1 + 20);
+    }
+    const rackTop = RACK_Y0 - 50;
+    const rackBottom = RACK_Y0 + (RACK_ITEMS.length - 1) * RACK_STEP + 50;
+    g.fillStyle(DARK_WOOD, 0.35);
+    g.fillRoundedRect(RACK_X - 44, rackTop, 88, rackBottom - rackTop, 10);
+    g.lineStyle(5, DARK_WOOD, 1);
+    g.lineBetween(RACK_X - 44, rackTop, RACK_X - 44, rackBottom);
+    g.lineBetween(RACK_X + 44, rackTop, RACK_X + 44, rackBottom);
+    for (let i = 0; i < RACK_ITEMS.length; i++) {
+      const y = RACK_Y0 + i * RACK_STEP + RACK_STEP / 2;
+      if (i < RACK_ITEMS.length - 1) g.lineBetween(RACK_X - 44, y, RACK_X + 44, y);
+    }
+    const style = {
+      fontFamily: "'Baloo 2', sans-serif", fontSize: '26px', fontStyle: 'bold', color: '#fff4dc',
+      stroke: '#3a200c', strokeThickness: 6, resolution: this.textResolution,
+    };
+    const board = (x: number, y: number, text: string) => {
+      g.fillStyle(0x8a5a2a, 1);
+      g.fillRect(x - 4, y + 14, 8, 26);
+      g.fillStyle(0xb5844a, 1);
+      g.fillRoundedRect(x - 42, y - 20, 84, 40, 8);
+      g.lineStyle(3, DARK_WOOD, 1);
+      g.strokeRoundedRect(x - 42, y - 20, 84, 40, 8);
+      this.add.text(x, y, text, style).setOrigin(0.5).setDepth(1.6);
+    };
+    for (const lane of TRAINING_LANES) {
+      const x = laneX(lane);
+      board(x, LANE_Y0 - 50, String(lane.distance));
+      board(x, LANE_Y1 + 50, String(lane.distance));
+    }
+    this.add.text(FIRING_LINE_X, y0 + 100, 'VẠCH BẮN', style).setOrigin(0.5).setDepth(1.6);
+    this.add.text(RACK_X, rackTop - 26, 'GIÁ VŨ KHÍ', { ...style, fontSize: '20px' }).setOrigin(0.5).setDepth(1.6);
   }
 
   /** Thatched boat roof of one room: tiered straw, a shaded far slope, the ridge, and crossed gable horns at the house ends. */
@@ -390,7 +528,7 @@ export class GameScene extends Phaser.Scene {
     const thatch = alongX
       ? this.add.tileSprite(x + w / 2, y + h / 2, w, h, TEX.thatch)
       : this.add.tileSprite(x + w / 2, y + h / 2, h, w, TEX.thatch).setAngle(90);
-    thatch.setTint(house.roof);
+    thatch.setTileScale(tileScale(this, TEX.thatch)).setTint(house.roof);
 
     const g = this.add.graphics();
     g.fillStyle(0x3a2410, 0.16);
@@ -430,6 +568,12 @@ export class GameScene extends Phaser.Scene {
     const cam = this.cameras.main;
     const hw = cam.width / cam.zoom / 2 + 64;
     const hh = cam.height / cam.zoom / 2 + 64;
+    if (cam.useBounds) {
+      // a bounded camera stops short of the player near the edges, so cull around where it really looks
+      const b = cam.getBounds();
+      cx = hw * 2 >= b.width ? b.centerX : Phaser.Math.Clamp(cx, b.x + hw - 64, b.right - hw + 64);
+      cy = hh * 2 >= b.height ? b.centerY : Phaser.Math.Clamp(cy, b.y + hh - 64, b.bottom - hh + 64);
+    }
     const x0 = cx - hw;
     const x1 = cx + hw;
     const y0 = cy - hh;
@@ -480,21 +624,25 @@ export class GameScene extends Phaser.Scene {
     const rarity = rarityOf(item);
     const color = RARITY_COLOR[rarity];
     const shadow = this.add.ellipse(2, 18, 40, 12, OUTLINE, 0.22);
+    // bright backing shown while the item is within pickup reach
+    const reach = this.add.circle(0, 0, 32, 0xffdf4d, 0.9).setStrokeStyle(4, 0xffffff, 1).setVisible(false);
+    reach.setName('reach');
     const glow = this.add.circle(0, 0, 27, color, 0.3);
     glow.setName('glow');
     const outer = this.add.circle(0, 0, 22.5, OUTLINE);
     const disc = this.add.circle(0, 0, 20, 0xffffff, 0.96).setStrokeStyle(4, color);
     const sheen = this.add.ellipse(-6, -9, 18, 8, 0xffffff, 0.9);
-    const parts: Phaser.GameObjects.GameObject[] = [shadow, glow, outer, disc, sheen];
+    const parts: Phaser.GameObjects.GameObject[] = [shadow, reach, glow, outer, disc, sheen];
     const key = this.ensureIcon(item);
     const icon = key
       ? this.add.image(0, 0, key).setDisplaySize(34, 34)
-      : this.add.text(0, 1, def.icon, { fontSize: '18px' }).setOrigin(0.5);
+      : this.add.text(0, 1, def.icon, { fontSize: '18px', resolution: this.textResolution }).setOrigin(0.5);
     icon.setName('icon');
     parts.push(icon);
     const name = this.add
       .text(0, 28, def.kind === 'ammo' ? `${def.name} ×${amount}` : def.name, {
         fontFamily: "'Baloo 2', sans-serif", fontSize: '13px', fontStyle: 'bold', color: '#fff', stroke: '#2a1a0e', strokeThickness: 4,
+        resolution: this.textResolution,
       })
       .setOrigin(0.5, 0)
       .setVisible(false);
@@ -526,17 +674,25 @@ export class GameScene extends Phaser.Scene {
     const at = (x: number, y: number) => spotAt(x - listener.x, y - listener.y);
     switch (e.k) {
       case 'shot': {
-        const view = this.players.get(e.pid);
-        const origin = view && e.pid !== this.session.viewPid ? view.muzzle() : { x: e.x, y: e.y };
+        // the server sweeps bullets from the shooter's centre (so a barrel poking through a wall can't shoot past it);
+        // the streak is drawn from the muzzle of the shooter as rendered to the bullet's real stopping point
         const dx = Math.cos(e.a);
         const dy = Math.sin(e.a);
         const hit = this.session.world.raycast(e.x, e.y, e.x + dx * e.rng, e.y + dy * e.rng);
         const maxDist = hit ? hit.t * e.rng : e.rng;
-        this.tracers.push({
-          id: e.id, x: e.x, y: e.y, dx, dy, speed: e.spd, maxDist, born: performance.now(),
-          width: e.w === 'sniper' ? 3 : 2, color: e.w === 'sniper' ? 0xbfe6ff : 0xfff1a8,
-        });
-        this.flash(origin.x + dx * 6, origin.y + dy * 6);
+        const view = this.players.get(e.pid);
+        const reach = Math.min(muzzleDistance(e.w), maxDist);
+        const origin = view ? view.muzzle(e.w, maxDist) : { x: e.x + dx * reach, y: e.y + dy * reach };
+        const endX = e.x + dx * maxDist;
+        const endY = e.y + dy * maxDist;
+        const len = Math.hypot(endX - origin.x, endY - origin.y);
+        if (maxDist > muzzleDistance(e.w) && len > 1) {
+          this.tracers.push({
+            id: e.id, x: origin.x, y: origin.y, dx: (endX - origin.x) / len, dy: (endY - origin.y) / len,
+            speed: e.spd, len, born: performance.now(), w: e.w,
+          });
+        }
+        this.release(origin.x, origin.y, e.w);
         sfx.shot(e.w, at(e.x, e.y), e.pid === this.session.viewPid);
         if (e.pid === this.session.viewPid && settings.screenShake && (e.w === 'shotgun' || e.w === 'sniper')) {
           this.cameras.main.shake(80, 0.003);
@@ -545,7 +701,7 @@ export class GameScene extends Phaser.Scene {
       }
       case 'bulletEnd': {
         const t = this.tracers.find((tr) => tr.id === e.id);
-        if (t) t.maxDist = Math.min(t.maxDist, Math.hypot(e.x - t.x, e.y - t.y));
+        if (t) t.len = Math.min(t.len, Math.hypot(e.x - t.x, e.y - t.y));
         this.particles(e.x, e.y, e.blood ? 0xc0392b : 0xcfcfcf, e.blood ? 6 : 3);
         if (e.blood) sfx.hit(at(e.x, e.y));
         break;
@@ -591,18 +747,24 @@ export class GameScene extends Phaser.Scene {
         if (settings.damageNumbers) this.floatText(e.x, e.y - 20, String(e.n), '#ffe066');
         sfx.hitMarker();
         break;
+      case 'boarDown':
+        this.particles(e.x, e.y, 0xc0392b, 14, 50);
+        this.particles(e.x, e.y, 0x6b4a2e, 8, 40);
+        this.floatText(e.x, e.y - 44, `Hạ! ${e.d}`, '#ff9a4a');
+        break;
       default:
         break;
     }
   }
 
-  private flash(x: number, y: number) {
-    const f = this.add.circle(x, y, 9, 0xfff3a0, 0.9).setDepth(13);
-    this.tweens.add({ targets: f, alpha: 0, scale: 0.4, duration: 70, onComplete: () => f.destroy() });
+  /** A puff of breath from the blowpipe, a flick of dust off a bowstring, a golden glint from the Thần tiễn. */
+  private release(x: number, y: number, w: WeaponId) {
+    const look = w === 'sniper' ? { r: 8, color: 0xffe27a, alpha: 0.8 } : w === 'pistol' ? { r: 6, color: 0xffffff, alpha: 0.55 } : { r: 5, color: 0xf2e6cc, alpha: 0.5 };
+    const f = this.add.circle(x, y, look.r, look.color, look.alpha).setDepth(13);
+    this.tweens.add({ targets: f, alpha: 0, scale: w === 'sniper' ? 1.8 : 1.4, duration: w === 'sniper' ? 180 : 110, onComplete: () => f.destroy() });
   }
 
   private particles(x: number, y: number, color: number, n: number, spread = 30) {
-    if (settings.quality === 'low') n = Math.ceil(n / 2);
     for (let i = 0; i < n; i++) {
       const p = this.add.circle(x, y, 2 + Math.random() * 3, color, 0.9).setDepth(15);
       const ang = Math.random() * Math.PI * 2;
@@ -616,7 +778,7 @@ export class GameScene extends Phaser.Scene {
 
   private floatText(x: number, y: number, text: string, color: string) {
     const t = this.add
-      .text(x + (Math.random() - 0.5) * 20, y, text, { fontFamily: "'Baloo 2', sans-serif", fontSize: '22px', fontStyle: 'bold', color, stroke: '#7a3800', strokeThickness: 5 })
+      .text(x + (Math.random() - 0.5) * 20, y, text, { fontFamily: "'Baloo 2', sans-serif", fontSize: '22px', fontStyle: 'bold', color, stroke: '#7a3800', strokeThickness: 5, resolution: this.textResolution })
       .setOrigin(0.5)
       .setDepth(61);
     this.tweens.add({ targets: t, y: y - 40, alpha: 0, duration: 700, onComplete: () => t.destroy() });
@@ -636,7 +798,7 @@ export class GameScene extends Phaser.Scene {
       let v = this.players.get(p.pid);
       if (!v) {
         const isSelf = p.pid === s.you;
-        v = new PlayerView(this, p.pid, isSelf ? null : s.nameOf(p.pid), isSelf);
+        v = new PlayerView(this, p.pid, isSelf ? null : s.nameOf(p.pid), isSelf, this.textResolution, s.mates.get(p.pid) ?? null, s.isAdmin(p.pid));
         this.players.set(p.pid, v);
       }
       v.lastSeen = now;
@@ -672,9 +834,13 @@ export class GameScene extends Phaser.Scene {
 
     const cam = this.cameras.main.worldView;
     const t = now / 1000;
-    for (const cont of this.lootViews.values()) {
+    const reachable = new Set(s.lootInReach().map((l) => l[0]));
+    for (const [id, cont] of this.lootViews) {
       const near = Math.abs(cont.x - view.x) < 110 && Math.abs(cont.y - view.y) < 110;
       (cont.getByName('name') as Phaser.GameObjects.Text | null)?.setVisible(near);
+      const reach = cont.getByName('reach') as Phaser.GameObjects.Arc;
+      reach.setVisible(reachable.has(id));
+      if (reach.visible) reach.setScale(1 + 0.07 * Math.sin(t * 6));
       if (!cam.contains(cont.x, cont.y)) continue;
       const phase = cont.getData('phase') as number;
       (cont.getByName('icon') as Phaser.GameObjects.Image | null)?.setY(Math.sin(t * 2.4 + phase) * 2);
@@ -686,7 +852,9 @@ export class GameScene extends Phaser.Scene {
     this.syncThrowables();
     this.syncSmokes();
     this.syncAirdrops();
-    this.drawZone();
+    if (this.training) this.syncBoars(delta);
+    else this.drawZone();
+    this.drawMarkers(t);
 
     this.fpsTimer += delta;
     if (this.fpsTimer > 500) {
@@ -709,28 +877,57 @@ export class GameScene extends Phaser.Scene {
     const g = this.tracerGfx;
     g.clear();
     this.tracers = this.tracers.filter((t) => {
+      const look = PROJECTILE[t.w] ?? PROJECTILE.rifle!;
       const traveled = ((now - t.born) / 1000) * t.speed;
-      const head = Math.min(traveled, t.maxDist);
-      const tail = Math.max(0, traveled - 90);
-      if (tail >= t.maxDist) return false;
-      g.lineStyle(t.width, t.color, 0.9);
-      g.lineBetween(t.x + t.dx * tail, t.y + t.dy * tail, t.x + t.dx * head, t.y + t.dy * head);
+      // the shot lingers a frame or two where it stopped so short hits still show
+      if (traveled > t.len + t.speed * 0.04) return false;
+      const head = Math.min(traveled, t.len);
+      const at = (d: number) => ({ x: t.x + t.dx * d, y: t.y + t.dy * d });
+      // a faint streak shows the flight line, longer and brighter for the Thần tiễn
+      const trail = t.w === 'sniper' ? 160 : 60;
+      const s0 = at(Math.max(0, head - trail));
+      const s1 = at(Math.max(0, head - look.len));
+      g.lineStyle(look.w + (t.w === 'sniper' ? 2 : 0), look.trail, t.w === 'sniper' ? 0.45 : 0.25);
+      g.lineBetween(s0.x, s0.y, s1.x, s1.y);
+      const tail = at(Math.max(0, head - look.len));
+      const tip = at(head);
+      g.lineStyle(look.w + 2, OUTLINE, 0.85);
+      g.lineBetween(tail.x, tail.y, tip.x, tip.y);
+      g.lineStyle(look.w, look.shaft, 1);
+      g.lineBetween(tail.x, tail.y, tip.x, tip.y);
+      const nx = -t.dy;
+      const ny = t.dx;
+      const hl = look.w * 2.6;
+      const hw = look.w * 1.6;
+      g.fillStyle(look.head, 1);
+      g.fillTriangle(tip.x + t.dx * hl * 0.6, tip.y + t.dy * hl * 0.6, tip.x - t.dx * hl + nx * hw, tip.y - t.dy * hl + ny * hw, tip.x - t.dx * hl - nx * hw, tip.y - t.dy * hl - ny * hw);
+      if (t.w === 'pistol') {
+        g.fillStyle(look.fletch, 1);
+        g.fillCircle(tail.x, tail.y, 2.6);
+      } else {
+        g.lineStyle(look.w * 0.9, look.fletch, 1);
+        for (const side of [-1, 1]) g.lineBetween(tail.x, tail.y, tail.x - t.dx * hl + nx * hw * side, tail.y - t.dy * hl + ny * hw * side);
+      }
       return true;
     });
   }
 
+
   private syncThrowables() {
     const seen = new Set<number>();
+    const now = performance.now();
     for (const [id, kind, x, y] of this.session.throwables) {
       seen.add(id);
       let v = this.throwViews.get(id);
       if (!v) {
-        v = this.add.circle(x, y, 8, kind === 0 ? 0x3d5a1e : 0xbbbbbb).setStrokeStyle(2, 0x111111).setDepth(13);
+        v = this.add.image(x, y, kind === 0 ? TEX.fireJar : TEX.gourd).setDisplaySize(20, 20).setDepth(13);
         this.throwViews.set(id, v);
       }
       v.x += (x - v.x) * 0.35;
       v.y += (y - v.y) * 0.35;
-      if (kind === 0) v.setFillStyle(Math.floor(performance.now() / 150) % 2 ? 0x3d5a1e : 0xd63b3b);
+      v.rotation = now / 120 + id;
+      // the burning wick flickers so a lit jar on the ground stands out
+      if (kind === 0) v.setTint(Math.floor(now / 140) % 2 ? 0xffffff : 0xffb070);
     }
     for (const [id, v] of this.throwViews) {
       if (!seen.has(id)) {
@@ -760,19 +957,30 @@ export class GameScene extends Phaser.Scene {
 
   private syncAirdrops() {
     const seen = new Set<number>();
+    // the drum "beats": two gold rings keep rolling out from it, so it is seen from far away
+    const beat = (this.time.now % 1600) / 1600;
     for (const [id, x, y, landed, msLeft] of this.session.airdrops) {
       seen.add(id);
       let v = this.airdropViews.get(id);
       if (!v) {
         // a bronze drum carried down by a Lạc bird
-        const drum = this.add.image(0, 0, TEX.drum).setDisplaySize(76, 76);
+        const waves: Phaser.GameObjects.Arc[] = [];
+        for (let i = 0; i < 2; i++) {
+          waves.push(this.add.circle(0, 0, 44).setStrokeStyle(8, 0x2a1a0e, 0.35), this.add.circle(0, 0, 44).setStrokeStyle(4, 0xffd257, 1));
+        }
+        const drum = this.add.image(0, 0, TEX.drum).setDisplaySize(80, 80);
         const bird = this.add.image(0, -24, TEX.lacBird).setDisplaySize(196, 98);
         bird.setName('chute');
         const shadow = this.add.circle(0, 0, 40, 0x000000, 0.25);
         shadow.setName('shadow');
-        v = this.add.container(x, y, [shadow, drum, bird]).setDepth(9);
+        v = this.add.container(x, y, [...waves, shadow, drum, bird]).setDepth(9);
+        v.setData('waves', waves);
         this.airdropViews.set(id, v);
       }
+      (v.getData('waves') as Phaser.GameObjects.Arc[]).forEach((ring, i) => {
+        const k = (beat + (i >> 1) * 0.5) % 1;
+        ring.setScale(1 + k * 1.5).setAlpha(1 - k);
+      });
       const chute = v.getByName('chute') as Phaser.GameObjects.Image;
       const shadow = v.getByName('shadow') as Phaser.GameObjects.Arc;
       if (landed) {
@@ -794,6 +1002,47 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * Boars move in straight runs, so they are drawn where the server has them now (latest snapshot pushed on by its speed)
+   * rather than 100ms in the past like players; aiming at what is on screen then lines up with the server's hit test.
+   */
+  private syncBoars(delta: number) {
+    const s = this.session;
+    const ahead = Phaser.Math.Clamp((s.serverTime() - s.boarsAt) / 1000, 0, 0.25);
+    const ease = Math.min(1, delta / 60);
+    const now = performance.now();
+    const seen = new Set<number>();
+    for (const [id, x, y, vy, hp] of s.boars) {
+      seen.add(id);
+      const ty = Phaser.Math.Clamp(y + vy * ahead, LANE_Y0, LANE_Y1);
+      let v = this.boarViews.get(id);
+      if (!v) {
+        const size = (96 * BOAR_WIDTH) / BOAR_BODY;
+        const body = this.add.image(0, 0, TEX.boar).setDisplaySize(size, size);
+        const back = this.add.rectangle(0, -BOAR_RADIUS - 14, BOAR_BAR_W + 4, 8, 0x2a1a0e, 0.85);
+        const bar = this.add.rectangle(-BOAR_BAR_W / 2, -BOAR_RADIUS - 14, BOAR_BAR_W, 4, 0x6ad04a).setOrigin(0, 0.5);
+        const cont = this.add.container(x, ty, [body, back, bar]).setDepth(9);
+        cont.setData('back', back);
+        v = { cont, body, bar, facing: vy < 0 ? -Math.PI / 2 : Math.PI / 2 };
+        this.boarViews.set(id, v);
+      }
+      v.cont.x = x;
+      v.cont.y += (ty - v.cont.y) * ease;
+      if (vy !== 0) v.facing = vy < 0 ? -Math.PI / 2 : Math.PI / 2;
+      // a trot: the body sways while running and holds still while the boar stops to sniff
+      const sway = vy !== 0 ? Math.sin(now / 70 + id) * 0.08 : 0;
+      v.body.rotation += (v.facing + sway - v.body.rotation) * Math.min(1, delta / 50);
+      const hurt = hp < 100;
+      v.bar.setVisible(hurt).setDisplaySize((BOAR_BAR_W * hp) / 100, 4).setFillStyle(hp > 50 ? 0x6ad04a : hp > 25 ? 0xf0c040 : 0xe04a3a);
+      (v.cont.getData('back') as Phaser.GameObjects.Rectangle).setVisible(hurt);
+    }
+    for (const [id, v] of this.boarViews) {
+      if (seen.has(id)) continue;
+      v.cont.destroy();
+      this.boarViews.delete(id);
+    }
+  }
+
   private drawZone() {
     const z = this.session.zone;
     const g = this.zoneGfx;
@@ -801,12 +1050,54 @@ export class GameScene extends Phaser.Scene {
     if (!z) return;
     const [x, y, r, tx, ty, tr] = z;
     const band = 9000;
+    if (this.session.lobby) {
+      // the waiting area: a warm boundary, no inner target circle
+      g.lineStyle(band, 0x3a1a08, 0.35);
+      g.strokeCircle(x, y, r + band / 2);
+      g.lineStyle(6, 0xffd36a, 0.95);
+      g.strokeCircle(x, y, r);
+      return;
+    }
     g.lineStyle(band, 0x2a4fd6, 0.28);
     g.strokeCircle(x, y, r + band / 2);
     g.lineStyle(5, 0x8fb8ff, 0.95);
     g.strokeCircle(x, y, Math.max(0, r));
     g.lineStyle(3, 0xffffff, 0.85);
     g.strokeCircle(tx, ty, Math.max(0, tr));
+  }
+
+  /** Map markers planted in the world: a banner on a pole with a ring pulsing at its foot. */
+  private drawMarkers(t: number) {
+    const g = this.markerGfx;
+    g.clear();
+    const s = this.session;
+    if (!s.markers.length) return;
+    const cam = this.cameras.main.worldView;
+    // scopes widen the view; grow the banner with it so it keeps its size on screen
+    const m = SCOPE_VIEW_MULTIPLIER[s.viewScope as ScopeLevel] ?? 1;
+    const pulse = (t * 0.8) % 1;
+    for (const [pid, x, y] of s.markers) {
+      if (!cam.contains(x, y) && !cam.contains(x, y - 80 * m)) continue;
+      const color = cssToNumber(pid === s.you ? OWN_MARKER_COLOR : s.mates.get(pid) ?? OWN_MARKER_COLOR);
+      g.lineStyle(3 * m, 0xffffff, 0.85 * (1 - pulse));
+      g.strokeCircle(x, y, (14 + pulse * 30) * m);
+      g.fillStyle(0x1a0d06, 0.35);
+      g.fillEllipse(x, y, 30 * m, 14 * m);
+      g.lineStyle(3 * m, color, 0.95);
+      g.strokeEllipse(x, y, 30 * m, 14 * m);
+      g.lineStyle(7 * m, 0x1a0d06, 1);
+      g.lineBetween(x, y, x, y - 72 * m);
+      g.lineStyle(3.5 * m, 0xf3e3bf, 1);
+      g.lineBetween(x, y, x, y - 72 * m);
+      // the cloth sways a little
+      const sway = Math.sin(t * 3 + pid) * 3 * m;
+      g.fillStyle(color, 1);
+      g.fillTriangle(x + 2 * m, y - 72 * m, x + 50 * m, y - 58 * m + sway, x + 2 * m, y - 44 * m);
+      g.lineStyle(3 * m, 0x1a0d06, 1);
+      g.strokeTriangle(x + 2 * m, y - 72 * m, x + 50 * m, y - 58 * m + sway, x + 2 * m, y - 44 * m);
+      g.fillStyle(0xffd257, 1);
+      g.fillCircle(x, y - 74 * m, 5 * m);
+    }
   }
 
   /** Angle difference helper used to keep remote rotation smooth. */

@@ -1,4 +1,5 @@
 import { settings } from '../settings';
+import { canFullscreen, enterFullscreen, isFullscreen, isPhone, leaveFullscreen, lockLandscape } from '../ui/fullscreen';
 import { iconSvg, scopeGlyph, type IconId } from './icons';
 
 interface Stick {
@@ -39,10 +40,13 @@ export class TouchControls {
   private readonly right: Stick;
   private readonly radius: number;
   private readonly buttons = new Map<TouchButton, HTMLElement>();
+  private readonly rotateHint: HTMLElement;
   private modeValue: TouchMode = 'play';
   private scopeLevel = 0;
+  /** Backup for players who did not tap their way in (room or party members): the first finished touch. */
+  private readonly onFirstTouchEnd = () => void this.goFullscreen();
 
-  constructor(private readonly root: HTMLElement, onButton: (b: TouchButton) => void) {
+  constructor(private readonly root: HTMLElement, onButton: (b: TouchButton) => void, training = false) {
     this.radius = 56 * settings.touchSize;
     root.innerHTML = '';
     root.classList.remove('hidden');
@@ -51,31 +55,27 @@ export class TouchControls {
     this.left = this.createStick('left');
     this.right = this.createStick('right');
 
-    const s = settings.touchSize;
-    const size = Math.round(50 * s);
-    const big = Math.round(size * 1.25);
-    const gap = 10;
-    const col1 = 12;
-    const col2 = col1 + size + gap;
-    const row = (i: number) => `calc(max(10px, env(safe-area-inset-bottom)) + ${i * (size + gap)}px)`;
+    // positions live in style.css (one layout for phones held sideways, one for tablets and upright screens)
+    const size = Math.round(50 * settings.touchSize);
+    document.body.style.setProperty('--tb', `${size}px`);
+    document.body.style.setProperty('--tb-big', `${Math.round(size * 1.3)}px`);
     const ic = (id: IconId) => iconSvg(id, Math.round(size * 0.62));
-    const defs: [TouchButton, string, string, number][] = [
-      ['heal', ic('medkit'), `right:${col1}px;bottom:${row(0)}`, size],
-      ['reload', '<small>R</small>', `right:${col1}px;bottom:${row(1)}`, size],
-      ['interact', '<small>NHẶT</small>', `right:${col1 - (big - size) / 2}px;bottom:${row(2)}`, big],
-      ['smoke', ic('smoke'), `right:${col2}px;bottom:${row(0)}`, size],
-      ['grenade', ic('grenade'), `right:${col2}px;bottom:${row(1)}`, size],
-      ['pause', '⏸', `left:10px;top:${56}px`, size],
-      ['scope', `${scopeGlyph(Math.round(size * 0.5))}<b class="tbadge">x1</b>`, `left:10px;top:${56 + (size + gap)}px`, size],
-      ['map', '🗺️', `left:10px;top:${56 + 2 * (size + gap)}px`, size],
-      ['inventory', ic('bag2'), `left:10px;top:${56 + 3 * (size + gap)}px`, size],
+    const defs: [TouchButton, string][] = [
+      ['heal', ic('medkit')],
+      ['reload', '<small>R</small>'],
+      ['interact', '<small>NHẶT</small>'],
+      ['smoke', ic('smoke')],
+      ['grenade', ic('grenade')],
+      ['pause', '⏸'],
+      ['scope', `${scopeGlyph(Math.round(size * 0.5))}<b class="tbadge">x1</b>`],
+      ['map', '🗺️'],
+      ['inventory', ic('bag2')],
     ];
-    for (const [id, label, style, px] of defs) {
+    for (const [id, label] of defs) {
       const btn = document.createElement('div');
-      btn.className = 'tbtn';
+      btn.className = `tbtn t-${id}`;
       for (const mode of ['move', 'view'] as const) if (MODE_BUTTONS[mode]!.has(id)) btn.classList.add(`in-${mode}`);
       btn.innerHTML = label;
-      btn.setAttribute('style', `${style};width:${px}px;height:${px}px`);
       btn.addEventListener('pointerdown', (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -84,6 +84,25 @@ export class TouchControls {
       root.appendChild(btn);
       this.buttons.set(id, btn);
     }
+
+    this.rotateHint = document.createElement('div');
+    this.rotateHint.className = 'rotate-hint';
+    this.rotateHint.innerHTML = `
+      <div class="rotate-phone" aria-hidden="true"></div>
+      <b>Xoay ngang điện thoại để chơi</b>
+      <p>${training ? 'Buổi tập' : 'Trận đấu'} vẫn đang diễn ra. Xoay ngang là chơi tiếp ngay.</p>
+      ${canFullscreen() ? '<button type="button" class="btn primary">Toàn màn hình và xoay ngang</button>' : '<p class="muted">Tắt khoá xoay màn hình nếu đang bật.</p>'}`;
+    this.rotateHint.querySelector('button')?.addEventListener('click', () => void this.goFullscreen());
+    document.body.appendChild(this.rotateHint);
+    // the lobby usually turned fullscreen on already (on the button that led here); then only the lock is left
+    if (isFullscreen()) void lockLandscape();
+    else if (isPhone() && canFullscreen()) root.addEventListener('pointerup', this.onFirstTouchEnd, { capture: true, once: true });
+  }
+
+  private async goFullscreen() {
+    this.root.removeEventListener('pointerup', this.onFirstTouchEnd, { capture: true });
+    await enterFullscreen();
+    await lockLandscape();
   }
 
   private createStick(side: 'left' | 'right'): Stick {
@@ -254,7 +273,12 @@ export class TouchControls {
 
   destroy() {
     this.reset();
+    this.root.removeEventListener('pointerup', this.onFirstTouchEnd, { capture: true });
+    leaveFullscreen();
+    this.rotateHint.remove();
     delete this.root.dataset.mode;
+    document.body.style.removeProperty('--tb');
+    document.body.style.removeProperty('--tb-big');
     document.body.classList.remove('touch-ui');
     this.root.innerHTML = '';
     this.root.classList.add('hidden');

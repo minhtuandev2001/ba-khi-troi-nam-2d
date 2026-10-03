@@ -2,6 +2,7 @@
   "name": "@game/frontend",
   "version": "1.0.0",
   "private": true,
+  "license": "UNLICENSED",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +12,8 @@
   },
   "dependencies": {
     "phaser": "^4.2.1",
-    "socket.io-client": "^4.8.4"
+    "socket.io-client": "^4.8.4",
+    "socket.io-msgpack-parser": "^3.0.2"
   },
   "devDependencies": {
     "typescript": "^5.9.2",

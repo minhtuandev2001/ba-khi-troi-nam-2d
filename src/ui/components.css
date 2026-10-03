@@ -1,0 +1,149 @@
+/*
+ * Reusable ui-* components. They only read the tokens declared in style.css :root,
+ * so a new feature composes these instead of restyling from scratch.
+ */
+
+/* frosted lacquer surface */
+.ui-panel {
+  background: var(--surface-1);
+  -webkit-backdrop-filter: var(--blur-soft);
+  backdrop-filter: var(--blur-soft);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-soft), inset 0 1px 0 rgba(255, 236, 200, 0.08);
+  text-shadow: var(--soft-text);
+}
+
+/* segmented tabs */
+.ui-seg {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius);
+  background: rgba(30, 12, 4, 0.32);
+}
+.ui-seg > button {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font-weight: 800;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+.ui-seg > button:hover { background: var(--surface-2); color: #fff; }
+.ui-seg > button.active { background: rgba(255, 246, 225, 0.94); color: var(--ink); text-shadow: none; box-shadow: 0 2px 6px rgba(30, 14, 4, 0.2); }
+
+/* round icon button */
+.ui-iconbtn {
+  --size: 36px;
+  position: relative;
+  width: var(--size);
+  height: var(--size);
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--line-soft);
+  background: var(--surface-2);
+  color: #fff;
+  font-size: calc(var(--size) * 0.44);
+  font-weight: 800;
+  cursor: pointer;
+  transition: background var(--dur-fast), transform var(--dur-fast) var(--ease-out);
+}
+.ui-iconbtn:hover { background: var(--surface-3); }
+.ui-iconbtn:active { transform: scale(0.94); }
+.ui-iconbtn.danger:hover { background: rgba(255, 107, 91, 0.25); color: #ffd0c8; }
+.ui-iconbtn.lg { --size: 56px; }
+
+/* unread / count pill */
+.ui-count {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--danger-soft);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  text-shadow: none;
+  box-shadow: 0 0 0 2px rgba(40, 16, 4, 0.55);
+}
+
+/* avatar with optional presence dot */
+.ui-avatar {
+  --size: 40px;
+  position: relative;
+  width: var(--size);
+  height: var(--size);
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(255, 246, 225, 0.92);
+  font-size: calc(var(--size) * 0.56);
+  text-shadow: none;
+  box-shadow: 0 0 0 2px var(--bronze);
+}
+.ui-avatar.sm { --size: 30px; }
+.ui-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--status-offline);
+  box-shadow: 0 0 0 2px #3a1a08;
+}
+.ui-dot[data-status='online'] { background: var(--status-online); }
+.ui-dot[data-status='in_match'] { background: var(--status-busy); }
+
+/* list row: avatar · title/subtitle · trailing actions */
+.ui-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-2);
+  border-radius: var(--radius);
+  transition: background var(--dur-fast);
+}
+.ui-row + .ui-row { margin-top: 2px; }
+.ui-row[role='button'] { cursor: pointer; }
+.ui-row[role='button']:hover, .ui-row[role='button']:focus-visible { background: var(--surface-2); outline: none; }
+.ui-row-body { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.ui-row-title { font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-row-sub { font-size: 12px; font-weight: 600; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-row-actions { display: flex; align-items: center; gap: var(--space-1); flex-shrink: 0; }
+.ui-row-actions .btn.small { padding: 4px 12px; font-size: 13px; }
+.ui-row-chevron { font-size: 22px; color: var(--muted); padding: 0 2px; }
+
+.ui-section-title {
+  margin: var(--space-4) var(--space-2) var(--space-2);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.ui-empty { padding: var(--space-4) var(--space-3); text-align: center; font-size: 13px; font-weight: 600; color: var(--muted); }
+
+/* slim scrollbar for scrolling panes */
+.ui-scroll { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: rgba(255, 236, 200, 0.28) transparent; }
+.ui-scroll::-webkit-scrollbar { width: 6px; }
+.ui-scroll::-webkit-scrollbar-thumb { background: rgba(255, 236, 200, 0.28); border-radius: 3px; }

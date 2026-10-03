@@ -26,6 +26,96 @@ export function toast(text: string, kind: 'info' | 'error' = 'info', ms = 3000) 
   setTimeout(() => el.remove(), ms);
 }
 
+export interface ConfirmOptions {
+  title: string;
+  message?: string;
+  confirmText?: string;
+  cancelText?: string;
+  danger?: boolean;
+}
+
+/** In-game replacement for window.confirm: resolves true on confirm, false on cancel, Escape or a backdrop click. */
+export function confirmDialog({ title, message, confirmText = 'Đồng ý', cancelText = 'Huỷ', danger = false }: ConfirmOptions): Promise<boolean> {
+  return new Promise((resolve) => {
+    const box = html(`<div class="overlay confirm-modal" role="dialog" aria-modal="true">
+      <div class="card">
+        <h2>${esc(title)}</h2>
+        ${message ? `<p>${esc(message)}</p>` : ''}
+        <div class="row btn-pair">
+          <button class="btn" data-a="cancel">${esc(cancelText)}</button>
+          <button class="btn ${danger ? 'danger' : 'primary'}" data-a="ok">${esc(confirmText)}</button>
+        </div>
+      </div></div>`);
+    const previous = document.activeElement as HTMLElement | null;
+    const done = (ok: boolean) => {
+      window.removeEventListener('keydown', onKey, true);
+      box.remove();
+      previous?.focus?.();
+      resolve(ok);
+    };
+    // captured on window so Escape doesn't also reach panels underneath (e.g. close the social drawer)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' && e.key !== 'Enter') return;
+      e.preventDefault();
+      e.stopPropagation();
+      done(e.key === 'Enter');
+    };
+    box.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement;
+      if (t === box) return done(false);
+      const a = t.closest<HTMLElement>('[data-a]')?.dataset.a;
+      if (a) done(a === 'ok');
+    });
+    window.addEventListener('keydown', onKey, true);
+    document.body.appendChild(box);
+    box.querySelector<HTMLElement>('[data-a="ok"]')!.focus();
+  });
+}
+
+export interface ChoiceOptions<T> {
+  title: string;
+  message?: string;
+  choices: { value: T; label: string; danger?: boolean }[];
+  cancelText?: string;
+}
+
+/** Like confirmDialog but with several answers; resolves the picked value, or null on cancel, Escape or a backdrop click. */
+export function choiceDialog<T>({ title, message, choices, cancelText = 'Huỷ' }: ChoiceOptions<T>): Promise<T | null> {
+  return new Promise((resolve) => {
+    const box = html(`<div class="overlay confirm-modal" role="dialog" aria-modal="true">
+      <div class="card">
+        <h2>${esc(title)}</h2>
+        ${message ? `<p>${esc(message)}</p>` : ''}
+        <div class="choice-list">
+          ${choices.map((c, i) => `<button class="btn ${c.danger ? 'danger' : ''}" data-i="${i}">${esc(c.label)}</button>`).join('')}
+        </div>
+        <div class="row btn-pair"><button class="btn" data-a="cancel">${esc(cancelText)}</button></div>
+      </div></div>`);
+    const previous = document.activeElement as HTMLElement | null;
+    const done = (value: T | null) => {
+      window.removeEventListener('keydown', onKey, true);
+      box.remove();
+      previous?.focus?.();
+      resolve(value);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      done(null);
+    };
+    box.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement;
+      if (t === box || t.closest('[data-a="cancel"]')) return done(null);
+      const i = t.closest<HTMLElement>('[data-i]')?.dataset.i;
+      if (i !== undefined) done(choices[Number(i)].value);
+    });
+    window.addEventListener('keydown', onKey, true);
+    document.body.appendChild(box);
+    box.querySelector<HTMLElement>('[data-a="cancel"]')!.focus();
+  });
+}
+
 export function formatDuration(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
   const m = Math.floor(total / 60);

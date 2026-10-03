@@ -1,57 +1,210 @@
 import type { Socket } from 'socket.io-client';
 import {
   AVATARS,
-  MAX_PLAYERS,
+  AVATAR_NAMES,
+  BOT_DIFFICULTIES,
+  BOT_DIFFICULTY_NAMES,
+  DEFAULT_BOT_DIFFICULTY,
+  DEFAULT_MAP,
+  MAP_DEFS,
+  MAP_IDS,
+  MATCH_HISTORY_KEEP,
   MODE_NAMES,
   NAME_MAX_LENGTH,
   NAME_MIN_LENGTH,
   PASSWORD_MAX_LENGTH,
   PASSWORD_MIN_LENGTH,
   QUEUE_NOTICE_AFTER_MS,
+  ROOM_NAME_MAX_LENGTH,
+  TEAM_SIZES,
+  TEAM_SIZE_NAMES,
+  TRAINING_LANES,
+  generateMap,
+  isBotDifficulty,
+  isMapChoice,
+  isTeamSize,
   isUuid,
   levelFromXp,
+  mapCapacity,
   validatePassword,
   validateUsername,
   xpForLevel,
+  type BotDifficulty,
+  type GameMode,
+  type LiveMatchSummary,
+  type MapChoice,
+  type MapId,
+  type MatchHistoryEntry,
   type MatchStartMsg,
+  type PartyInviteMsg,
+  type PartyStateMsg,
   type PublicUser,
   type QueueStatusMsg,
+  type RoomMember,
   type RoomStateMsg,
+  type RoomSummary,
+  type TeamSize,
 } from './shared';
 import { ApiError, api, getToken, setToken } from './api';
-import { unlockAudio } from './game/audio';
-import { GameSession } from './game/session';
+import { setMenuMusic, unlockAudio } from './game/audio';
+import { MapRenderer } from './game/Minimap';
+import type { GameSession } from './game/session';
 import { connectSocket, disconnectSocket } from './net';
-import { $, esc, formatDate, formatDuration, toast } from './ui/dom';
+import { setDevtoolsAllowed } from './ui/devtoolsGuard';
+import { $, confirmDialog, esc, formatDate, formatDuration, html, toast } from './ui/dom';
+import { enterFullscreen, leaveFullscreen } from './ui/fullscreen';
 import { NetStatus, SERVER_WAKING_TEXT } from './ui/netStatus';
 import { bindSettings, guidePanel, itemsPanel, keysPanel, settingsPanel } from './ui/panels';
+import { walker } from './ui/loader';
+import { adminBadge, nameHtml } from './ui/names';
+import { showStoryDialog } from './ui/story';
 import { MODE_ICONS } from './ui/theme';
+import { SocialClient } from './social/SocialClient';
+import { SocialPanel } from './social/SocialPanel';
 
-type Screen = 'loading' | 'auth' | 'lobby' | 'queue' | 'room' | 'profile' | 'history' | 'panel' | 'game' | 'message';
+type Screen = 'loading' | 'auth' | 'lobby' | 'queue' | 'room' | 'party' | 'profile' | 'panel' | 'game' | 'message';
+/** Screens on the way into a match, or in one; leaving them for anything else ends fullscreen on phones. */
+const PLAY_SCREENS = new Set<Screen>(['queue', 'room', 'party', 'game']);
+/** Requests sent by the tap that starts a match (or the wait for one); phones go fullscreen right then. */
+const FULLSCREEN_EVENTS = new Set(['queue:join', 'party:queue', 'bot:start', 'training:start', 'room:start']);
 
 const PENDING_ROOM_KEY = 'br2d_pending_room';
+const PENDING_PARTY_KEY = 'br2d_pending_party';
+const INVITE_SENT_MS = 10_000;
+const SOCIAL_HIDDEN_ON = new Set<Screen>(['loading', 'auth', 'game', 'message']);
+const HISTORY_PAGE_SIZE = 10;
+/** Shown under the logo on the sign-in screen and in the lobby. */
+const TAGLINE = 'Nghịch cảnh càng lớn, ý chí càng mạnh.';
+
+type PanelNav = 'guide' | 'items' | 'keys' | 'settings';
+type NavKey = 'lobby' | 'profile' | PanelNav;
+/** Every menu screen shows the same toolbar (only the highlight moves), so the header never shifts. */
+const NAV_BUTTONS: [nav: NavKey, icon: string, label: string][] = [
+  ['lobby', '🏠', 'Sảnh'],
+  ['guide', '📖', 'Hướng dẫn'],
+  ['items', '🎒', 'Vật phẩm'],
+  ['keys', '⌨️', 'Phím tắt'],
+  ['settings', '⚙️', 'Cài đặt'],
+];
+
+/** Phaser is most of the bundle, so the game code is a separate chunk: fetched in the background after login, awaited on match start. */
+let gameModule: Promise<typeof import('./game/session')> | null = null;
+const loadGame = () => {
+  gameModule ??= import('./game/session').catch((err) => {
+    gameModule = null;
+    throw err;
+  });
+  return gameModule;
+};
+
+const MAP_CHOICE_KEY = 'br2d_map';
+const MAP_CHOICES: MapChoice[] = ['random', ...MAP_IDS];
+const RANDOM_MAP = { icon: '🎲', name: 'Ngẫu nhiên', blurb: 'Hệ thống bốc thăm một bản đồ đủ chỗ cho số người trong trận.' };
+const SMALLEST_MAP = Math.min(...MAP_IDS.map((id) => MAP_DEFS[id].maxPlayers));
+
+function savedMapChoice(): MapChoice {
+  const v = localStorage.getItem(MAP_CHOICE_KEY);
+  return isMapChoice(v) ? v : DEFAULT_MAP;
+}
+
+const BOT_DIFFICULTY_KEY = 'br2d_bot_difficulty';
+function savedBotDifficulty(): BotDifficulty {
+  const v = localStorage.getItem(BOT_DIFFICULTY_KEY);
+  return isBotDifficulty(v) ? v : DEFAULT_BOT_DIFFICULTY;
+}
+
+const TEAM_SIZE_KEY = 'br2d_team_size';
+function savedTeamSize(): TeamSize {
+  const v = Number(localStorage.getItem(TEAM_SIZE_KEY));
+  return isTeamSize(v) ? v : 1;
+}
+
+/** Team size last picked inside a room; new rooms open with it. */
+const ROOM_TEAM_KEY = 'br2d_room_team';
+function savedRoomTeam(): TeamSize {
+  const v = Number(localStorage.getItem(ROOM_TEAM_KEY));
+  return isTeamSize(v) ? v : 1;
+}
+
+/** Name and visibility used for the last room created, offered again in the create dialog. */
+const ROOM_NAME_KEY = 'br2d_room_name';
+const ROOM_LISTED_KEY = 'br2d_room_listed';
+
+const LIVE_MODE_ICONS: Record<GameMode, string> = { pvp: '⚔️', bots: '🤖', private: '🏮', training: '🎯' };
+
+const PRESENCE_TEXT = { online: 'Trực tuyến', in_match: 'Đang trong trận', offline: 'Ngoại tuyến' } as const;
+
+const mapInfo = (id: MapChoice) => (id === 'random' ? RANDOM_MAP : MAP_DEFS[id]);
+
+const mapTile = (id: MapChoice, selected: boolean, compact: boolean, disabled: boolean) => {
+  const m = mapInfo(id);
+  const thumb = id === 'random'
+    ? '<div class="map-thumb random">🎲</div>'
+    : `<canvas class="map-thumb" width="160" height="160" data-preview="${id}"></canvas>`;
+  const cap = id === 'random' ? `${SMALLEST_MAP}–${mapCapacity(id)}` : String(mapCapacity(id));
+  return `<button type="button" class="map-tile${compact ? ' compact' : ''}${selected ? ' active' : ''}" data-map="${id}" ${disabled ? 'disabled' : ''} title="${esc(m.blurb)}">
+    ${thumb}<b>${m.icon} ${esc(m.name)}</b><span class="map-cap">👥 ${cap} người</span>${compact ? '' : `<small>${esc(m.blurb)}</small>`}</button>`;
+};
+
+const previews = new Map<MapId, MapRenderer>();
+function paintPreviews(root: ParentNode) {
+  for (const c of root.querySelectorAll<HTMLCanvasElement>('canvas[data-preview]')) {
+    const id = c.dataset.preview as MapId;
+    let r = previews.get(id);
+    if (!r) {
+      r = new MapRenderer(generateMap(id), 320);
+      previews.set(id, r);
+    }
+    r.preview(c);
+  }
+}
+
+const avatarPicker = (selected: string) =>
+  `<div class="avatar-picker">${AVATARS.map((a) => `<button type="button" data-avatar="${a}" class="${a === selected ? 'active' : ''}" title="${AVATAR_NAMES[a]}" aria-label="${AVATAR_NAMES[a]}">${a}</button>`).join('')}</div>`;
 
 export class App {
   private readonly ui = document.getElementById('ui')!;
   private user: PublicUser | null = null;
   private socket: Socket | null = null;
   private session: GameSession | null = null;
+  /** Bumped whenever a pending game load must be discarded (newer match, logout, replaced session). */
+  private gameLoad = 0;
   private screen: Screen = 'loading';
   private queue: QueueStatusMsg | null = null;
   private queueSince = 0;
   private queueTimer = 0;
   private room: RoomStateMsg | null = null;
+  /** Lobby room list, null until the server first sends it. */
+  private roomList: RoomSummary[] | null = null;
+  private watchingRooms = false;
+  /** Admins only: matches being played, null until the server first sends them. */
+  private liveMatches: LiveMatchSummary[] | null = null;
+  private watchingMatches = false;
+  private browserTab: 'rooms' | 'live' = 'rooms';
+  private party: PartyStateMsg | null = null;
+  /** Friends invited to the party recently, so their button shows "Đã mời" for a while. */
+  private readonly invitedAt = new Map<string, number>();
   private readonly net = new NetStatus();
+  private readonly social = new SocialClient();
+  private readonly socialPanel = new SocialPanel(this.social);
   /** Set while a start/join request is in flight so repeated taps don't send it twice. */
   private pendingUntil = 0;
+
+  constructor() {
+    this.social.subscribe((c) => {
+      if (this.screen === 'party' && (c.type === 'friends' || c.type === 'presence')) this.renderPartyFriends();
+    });
+  }
 
   async init() {
     const params = new URLSearchParams(location.search);
     const invite = params.get('room');
     if (invite && isUuid(invite)) sessionStorage.setItem(PENDING_ROOM_KEY, invite);
-    if (invite) history.replaceState(null, '', location.pathname);
+    const partyInvite = params.get('party');
+    if (partyInvite && isUuid(partyInvite)) sessionStorage.setItem(PENDING_PARTY_KEY, partyInvite);
+    if (invite || partyInvite) history.replaceState(null, '', location.pathname);
 
-    this.render('loading', `<div class="screen"><div class="logo">BÁ KHÍ<span>TRỜI NAM 2D</span></div><div class="spinner"></div><p class="muted center" id="boot-hint"></p></div>`);
+    this.render('loading', `<div class="screen centered"><div><div class="logo">BÁ KHÍ<span>TRỜI NAM 2D</span></div>${walker()}<p class="muted center" id="boot-hint"></p></div></div>`);
     const hintTimer = window.setTimeout(() => {
       const hint = this.ui.querySelector('#boot-hint');
       if (hint) hint.textContent = SERVER_WAKING_TEXT;
@@ -68,6 +221,7 @@ export class App {
         setToken(null);
         this.showAuth('login');
       } else {
+        setDevtoolsAllowed(false);
         this.showMessage('Không kết nối được máy chủ', (err as Error).message, () => this.init());
       }
     } finally {
@@ -87,6 +241,8 @@ export class App {
       this.pendingUntil = Date.now() + 5000;
       document.body.classList.add('net-pending');
     }
+    // must run inside the tap: the match start that follows comes from the server, too late to count as one
+    if (FULLSCREEN_EVENTS.has(event)) void enterFullscreen();
     if (arg === undefined) s.emit(event);
     else s.emit(event, arg);
     return true;
@@ -119,7 +275,7 @@ export class App {
   }
 
   private loadFailed(title: string, err: unknown, retry: () => void) {
-    this.render(this.screen, `<div class="screen"><div class="container">${this.header()}
+    this.render(this.screen, `<div class="screen"><div class="container">${this.header(this.screen === 'profile' ? 'profile' : null)}
       <div class="card center"><h2>${esc(title)}</h2><p class="muted">${esc((err as Error).message)}</p>
       <button class="btn primary" id="retry">Thử lại</button></div></div></div>`);
     this.bindNav();
@@ -127,9 +283,38 @@ export class App {
   }
 
   private render(screen: Screen, markup: string) {
+    // fullscreen turned on by a play button ends when the player backs out without playing (left the queue or room)
+    if (PLAY_SCREENS.has(this.screen) && !PLAY_SCREENS.has(screen)) leaveFullscreen();
     this.screen = screen;
     this.ui.innerHTML = markup;
     this.ui.classList.toggle('hidden', screen === 'game');
+    setMenuMusic(screen !== 'game');
+    this.socialPanel.setAllowed(!!this.user && !!this.socket && !SOCIAL_HIDDEN_ON.has(screen));
+    this.syncRoomWatch();
+  }
+
+  /** The server only pushes the room list (and, to admins, the live match list) while the lobby is on screen. */
+  private syncRoomWatch() {
+    const s = this.socket;
+    if (!s?.connected) {
+      this.watchingRooms = false;
+      this.watchingMatches = false;
+      return;
+    }
+    const want = this.screen === 'lobby';
+    if (want !== this.watchingRooms) {
+      this.watchingRooms = want;
+      s.emit(want ? 'rooms:watch' : 'rooms:unwatch');
+    }
+    const wantMatches = want && this.isAdmin;
+    if (wantMatches !== this.watchingMatches) {
+      this.watchingMatches = wantMatches;
+      s.emit(wantMatches ? 'matches:watch' : 'matches:unwatch');
+    }
+  }
+
+  private get isAdmin(): boolean {
+    return this.user?.role === 'admin';
   }
 
   private showMessage(title: string, text: string, retry?: () => void) {
@@ -142,15 +327,18 @@ export class App {
   // ---------------------------------------------------------------- auth
 
   private showAuth(tab: 'login' | 'register') {
+    setDevtoolsAllowed(false);
     const pendingRoom = sessionStorage.getItem(PENDING_ROOM_KEY);
+    const pendingParty = sessionStorage.getItem(PENDING_PARTY_KEY);
     let avatar: string = AVATARS[Math.floor(Math.random() * AVATARS.length)];
     this.render('auth', `
       <div class="screen">
         <div class="logo-kicker">Huyền sử Văn Lang</div>
         <div class="logo">BÁ KHÍ<span>TRỜI NAM 2D</span></div>
-        <div class="subtitle">Battle royale nhìn từ trên xuống · tối đa ${MAX_PLAYERS} người mỗi trận</div>
+        <div class="subtitle">${TAGLINE}</div>
         <div class="narrow">
           ${pendingRoom ? '<div class="notice" style="margin-bottom:12px">Bạn được mời vào một phòng chơi. Hãy đăng nhập hoặc đăng ký để vào phòng.</div>' : ''}
+          ${pendingParty && !pendingRoom ? '<div class="notice" style="margin-bottom:12px">Bạn được mời vào một nhóm ghép trận. Hãy đăng nhập hoặc đăng ký để vào nhóm.</div>' : ''}
           <div class="card">
             <div class="tabs">
               <button class="btn ${tab === 'login' ? 'active' : ''}" data-tab="login">Đăng nhập</button>
@@ -178,7 +366,8 @@ export class App {
                 <div class="field"><label>Nhập lại mật khẩu</label>
                   <input class="input" type="password" name="confirm" maxlength="${PASSWORD_MAX_LENGTH}" autocomplete="new-password" required /></div>
                 <div class="field"><label>Chọn ảnh đại diện</label>
-                  <div class="avatar-picker">${AVATARS.map((a) => `<button type="button" data-avatar="${a}" class="${a === avatar ? 'active' : ''}">${a}</button>`).join('')}</div></div>` : ''}
+                  ${avatarPicker(avatar)}</div>
+                <div class="hp-field" aria-hidden="true"><label>Để trống ô này<input name="website" tabindex="-1" autocomplete="off" /></label></div>` : ''}
               <div class="error" id="auth-error"></div>
               <button class="btn primary big block" type="submit">${tab === 'login' ? 'Đăng nhập' : 'Tạo tài khoản'}</button>
             </form>
@@ -190,6 +379,7 @@ export class App {
       b.addEventListener('click', () => this.showAuth(b.dataset.tab as 'login' | 'register')),
     );
     const form = $('#auth-form') as HTMLFormElement;
+    const shownAt = performance.now();
     const nameInput = form.elements.namedItem('username') as HTMLInputElement;
     const pwInput = form.elements.namedItem('password') as HTMLInputElement;
     const errorBox = $('#auth-error');
@@ -246,9 +436,13 @@ export class App {
         if (!errorBox.textContent) errorBox.innerHTML = `<span class="muted">${esc(SERVER_WAKING_TEXT)}</span>`;
       }, 4000);
       try {
-        const res = tab === 'login' ? await api.login(username, password) : await api.register(username, password, avatar);
+        const website = (form.elements.namedItem('website') as HTMLInputElement | null)?.value ?? '';
+        const res = tab === 'login'
+          ? await api.login(username, password)
+          : await api.register(username, password, avatar, Math.round(performance.now() - shownAt), website);
         setToken(res.token);
         this.onLoggedIn(res.user);
+        if (tab === 'register') void showStoryDialog(res.user.username);
       } catch (err) {
         errorBox.textContent = (err as Error).message;
         btn.disabled = false;
@@ -261,12 +455,15 @@ export class App {
 
   private onLoggedIn(user: PublicUser) {
     this.user = user;
+    setDevtoolsAllowed(user.role === 'admin');
     this.connect();
     this.showLobby();
+    window.setTimeout(() => loadGame().catch(() => undefined), 300);
   }
 
   private logout() {
     setToken(null);
+    this.gameLoad++;
     this.session?.destroy();
     this.session = null;
     if (this.socket?.connected) {
@@ -275,9 +472,15 @@ export class App {
     }
     disconnectSocket();
     this.socket = null;
+    this.social.detach();
+    this.socialPanel.reset();
     this.net.set('hidden');
     this.user = null;
     this.room = null;
+    this.roomList = null;
+    this.liveMatches = null;
+    this.browserTab = 'rooms';
+    this.party = null;
     this.queue = null;
     this.clearPending();
     this.showAuth('login');
@@ -289,6 +492,7 @@ export class App {
     if (this.socket) return;
     const s = connectSocket();
     this.socket = s;
+    this.social.attach(s, this.user!);
     let everConnected = false;
     let lostAt = 0;
     const slowTimer = window.setTimeout(() => {
@@ -300,8 +504,11 @@ export class App {
       if (everConnected && lostAt) toast('Đã kết nối lại máy chủ');
       everConnected = true;
       lostAt = 0;
+      this.syncRoomWatch();
     });
     s.on('disconnect', (reason) => {
+      this.watchingRooms = false;
+      this.watchingMatches = false;
       if (reason === 'io client disconnect') return;
       this.clearPending();
       lostAt = Date.now();
@@ -313,6 +520,10 @@ export class App {
         this.logout();
         return;
       }
+      if (err.message === 'too_many_connections') {
+        this.net.set(everConnected ? 'lost' : 'connecting', 'Mạng của bạn đang mở quá nhiều kết nối, đang thử lại…');
+        return;
+      }
       this.net.set(everConnected ? 'lost' : 'connecting', everConnected ? undefined : SERVER_WAKING_TEXT);
     });
     s.on('lobby:ready', () => {
@@ -321,11 +532,17 @@ export class App {
         sessionStorage.removeItem(PENDING_ROOM_KEY);
         s.emit('room:join', pending);
       }
+      const pendingParty = sessionStorage.getItem(PENDING_PARTY_KEY);
+      if (pendingParty) {
+        sessionStorage.removeItem(PENDING_PARTY_KEY);
+        if (!pending) s.emit('party:join', pendingParty);
+      }
       // the server only says "lobby" when we are no longer in a match, so a live session means it ended while we were away
       if (this.session && !this.session.isEnded) {
+        const observer = this.session.observer;
         this.session.destroy();
         this.session = null;
-        toast('Trận đấu đã kết thúc trong lúc bạn mất kết nối.', 'error', 5000);
+        toast(observer ? 'Mất kết nối, đã thoát chế độ xem trận.' : 'Trận đấu đã kết thúc trong lúc bạn mất kết nối.', 'error', 5000);
         this.showLobby();
         this.refreshUser();
       } else if (this.screen === 'game' && !this.session) {
@@ -337,17 +554,49 @@ export class App {
       if (msg.inQueue) {
         if (!this.queue?.inQueue) this.queueSince = Date.now() - msg.waitedMs;
         this.queue = msg;
-        if (this.screen === 'queue' || this.screen === 'lobby') this.showQueue();
+        if (this.screen === 'queue' || this.screen === 'lobby' || this.screen === 'party') this.showQueue();
       } else {
         this.queue = null;
         if (this.screen === 'queue') this.showLobby();
       }
+    });
+    s.on('party:state', (msg: PartyStateMsg) => {
+      this.clearPending();
+      this.party = msg;
+      if (this.screen === 'party' || this.screen === 'lobby') this.showLobby();
+    });
+    s.on('party:closed', (info?: { reason?: string }) => {
+      this.clearPending();
+      const had = this.party !== null;
+      this.party = null;
+      if (had && info?.reason === 'kicked') toast('Bạn đã bị trưởng nhóm mời ra khỏi nhóm.', 'error', 4000);
+      if (had && info?.reason === 'gone') toast('Nhóm đã giải tán trong lúc bạn mất kết nối.', 'error', 4000);
+      if (this.screen === 'party') this.showLobby();
+    });
+    s.on('party:invite', (msg: PartyInviteMsg) => void this.onPartyInvite(msg));
+    s.on('party:invited', (e: { userId: string }) => {
+      this.invitedAt.set(e.userId, Date.now());
+      toast(`Đã gửi lời mời tới ${this.social.friend(e.userId)?.username ?? 'bạn bè'}`);
+      if (this.screen === 'party') this.renderPartyFriends();
     });
     s.on('room:state', (msg: RoomStateMsg) => {
       this.clearPending();
       this.room = msg;
       if (this.screen === 'room' || this.screen === 'lobby') this.showRoom();
     });
+    s.on('rooms:list', (list: RoomSummary[]) => {
+      this.roomList = list;
+      if (this.screen === 'lobby') this.renderRoomList();
+    });
+    s.on('matches:list', (list: LiveMatchSummary[]) => {
+      this.liveMatches = list;
+      if (this.screen === 'lobby') this.renderRoomList();
+    });
+    s.on('match:kicked', () => this.leaveGame('Bạn đã bị admin kích khỏi trận đấu.'));
+    s.on('match:closed', (info?: { text?: unknown }) =>
+      this.leaveGame(typeof info?.text === 'string' ? info.text : 'Trận đấu đã đóng.', 'info'));
+    s.on('observe:ended', (info?: { winnerName?: string }) =>
+      this.leaveGame(`Trận đấu đã kết thúc${info?.winnerName ? `, người thắng: ${info.winnerName}` : ''}.`, 'info'));
     s.on('room:closed', (info?: { reason?: string }) => {
       this.clearPending();
       const had = this.room !== null;
@@ -366,7 +615,10 @@ export class App {
     s.on('session:replaced', () => {
       disconnectSocket();
       this.socket = null;
+      this.social.detach();
+      this.socialPanel.reset();
       this.net.set('hidden');
+      this.gameLoad++;
       this.session?.destroy();
       this.session = null;
       this.showMessage('Tài khoản đang được dùng ở nơi khác', 'Bạn vừa đăng nhập trên một thiết bị hoặc tab khác.', () => {
@@ -376,48 +628,84 @@ export class App {
     });
   }
 
+  /** The server ended our part in a match (kicked, or the watched match is over): back to the lobby with a note. */
+  private leaveGame(text: string, kind: 'info' | 'error' = 'error') {
+    if (!this.session && this.screen !== 'game') return;
+    this.gameLoad++;
+    this.session?.destroy();
+    this.session = null;
+    toast(text, kind, 6000);
+    this.showLobby();
+    this.refreshUser();
+  }
+
   private startGame(msg: MatchStartMsg) {
     if (this.session && this.session.matchId === msg.matchId && !this.session.isEnded) {
       this.session.resync(msg);
       return;
     }
     this.session?.destroy();
+    this.session = null;
     this.queue = null;
     this.room = null;
+    if (this.party) this.party.inQueue = false;
     window.clearInterval(this.queueTimer);
+    const load = ++this.gameLoad;
     this.render('game', '');
-    this.session = new GameSession(msg, this.socket!, () => {
-      this.session = null;
-      this.showLobby();
-      this.refreshUser();
-    });
+    // the chunk is normally prefetched in the lobby; only a very fast start shows the loader
+    let ready = false;
+    window.setTimeout(() => {
+      if (!ready && load === this.gameLoad) this.ui.innerHTML = `<div class="screen centered"><div>${walker('Đang vào trận')}</div></div>`;
+    }, 150);
+    loadGame()
+      .then(({ GameSession }) => {
+        ready = true;
+        if (load !== this.gameLoad || !this.socket) return;
+        this.ui.innerHTML = '';
+        this.session = new GameSession(msg, this.socket, () => {
+          this.session = null;
+          this.showLobby();
+          this.refreshUser();
+        });
+      })
+      .catch((err) => {
+        ready = true;
+        if (load !== this.gameLoad) return;
+        this.showMessage('Không tải được trận đấu', (err as Error).message, () => this.startGame(msg));
+      });
   }
 
   private refreshUser() {
     api.me().then(({ user }) => {
       this.user = user;
+      setDevtoolsAllowed(user.role === 'admin');
+      this.social.setMe(user);
       if (this.screen === 'lobby') this.showLobby();
     }).catch(() => undefined);
   }
 
   // ---------------------------------------------------------------- lobby
 
-  private header(inLobby = false): string {
+  private header(current: NavKey | null = null): string {
     const u = this.user!;
     const level = levelFromXp(u.xp);
     const from = xpForLevel(level);
     const to = xpForLevel(level + 1);
     const pct = ((u.xp - from) / (to - from)) * 100;
+    const info = `${u.username} · Cấp ${level} · ${u.xp - from}/${to - from} XP`;
     return `<div class="topbar">
-      <div class="player-chip" data-nav="profile" title="Hồ sơ & thống kê">
-        <span class="avatar">${esc(u.avatar)}</span>
-        <div><div class="name">${esc(u.username)}</div>
-          <div class="muted" style="font-size:12px">Cấp ${level} · ${u.xp - from}/${to - from} XP</div>
-          <div class="xpbar"><div style="width:${pct}%"></div></div></div>
-      </div>
+      <button type="button" class="player-chip${current === 'profile' ? ' active' : ''}" data-nav="profile"
+        title="${esc(info)} · Xem hồ sơ" aria-label="${esc(info)}. Xem hồ sơ">
+        <span class="xp-ring" style="--xp:${pct.toFixed(1)}%"><span class="avatar">${esc(u.avatar)}</span><span class="lv-badge">${level}</span></span>
+        <span class="chip-info">
+          <span class="chip-name">${nameHtml(u.username, u.role === 'admin', false)}</span>
+          <span class="chip-meta muted">${u.role === 'admin' ? '🛡️ Quản trị · ' : ''}Cấp ${level} · ${u.xp - from}/${to - from} XP</span>
+          <span class="xpbar"><span style="width:${pct.toFixed(1)}%"></span></span>
+        </span>
+      </button>
       <div class="row topbar-actions">
-        ${inLobby ? '' : '<button class="btn small" data-nav="lobby">🏠 Sảnh</button><button class="btn small" data-nav="settings" title="Cài đặt" aria-label="Cài đặt">⚙️</button>'}
-        <button class="btn small" data-nav="logout">Đăng xuất</button>
+        ${NAV_BUTTONS.map(([nav, icon, label]) => `<button class="btn small tool-btn${nav === current ? ' active' : ''}" data-nav="${nav}" title="${label}" aria-label="${label}"${nav === current ? ' aria-current="page"' : ''}><span>${icon}</span><em>${label}</em></button>`).join('')}
+        <button class="btn small logout-btn" data-nav="logout" title="Đăng xuất" aria-label="Đăng xuất"><i aria-hidden="true">🚪</i><em>Đăng xuất</em></button>
       </div>
     </div>`;
   }
@@ -430,11 +718,10 @@ export class App {
           case 'lobby': return this.showLobby();
           case 'logout': return this.logout();
           case 'profile': return this.showProfile();
-          case 'history': return this.showHistory(0);
-          case 'guide': return this.showPanel('📖 Hướng dẫn chơi', guidePanel());
-          case 'items': return this.showPanel('🎒 Vật phẩm trong game', itemsPanel());
-          case 'keys': return this.showPanel('⌨️ Phím tắt', keysPanel());
-          case 'settings': return this.showPanel('⚙️ Cài đặt', settingsPanel(), bindSettings);
+          case 'guide': return this.showPanel('guide', '📖 Hướng dẫn chơi', guidePanel());
+          case 'items': return this.showPanel('items', '🎒 Vật phẩm trong game', itemsPanel());
+          case 'keys': return this.showPanel('keys', '⌨️ Phím tắt', keysPanel());
+          case 'settings': return this.showPanel('settings', '⚙️ Cài đặt', settingsPanel(), bindSettings);
         }
       }),
     );
@@ -444,58 +731,121 @@ export class App {
     if (!this.user) return this.showAuth('login');
     if (this.queue?.inQueue) return this.showQueue();
     if (this.room) return this.showRoom();
+    if (this.party) return this.showParty();
+    const team = savedTeamSize();
     this.render('lobby', `
       <div class="screen"><div class="container lobby">
-        ${this.header(true)}
+        ${this.header('lobby')}
         <div class="lobby-main">
           <div class="lobby-hero">
             <div class="logo-kicker">Huyền sử Văn Lang</div>
             <div class="logo">BÁ KHÍ<span>TRỜI NAM 2D</span></div>
-            <div class="subtitle">Nhặt đồ, né bo, trụ lại đến cuối cùng</div>
+            <div class="subtitle">${TAGLINE}</div>
           </div>
-          <div class="modes">
-            <div class="card mode-card" data-mode="pvp">
-              <div class="icon">${MODE_ICONS.pvp}</div><h3>${MODE_NAMES.pvp}</h3>
-              <p>Ghép trận tự động. Trận bắt đầu khi đủ ${MAX_PLAYERS} người chơi thật.</p>
-              <span class="btn primary mode-cta">Tìm trận</span>
-            </div>
-            <div class="card mode-card" data-mode="bots">
-              <div class="icon">${MODE_ICONS.bots}</div><h3>${MODE_NAMES.bots}</h3>
-              <p>Vào trận ngay với ${MAX_PLAYERS - 1} bot. Phù hợp để luyện tập.</p>
-              <span class="btn primary mode-cta">Chơi ngay</span>
-            </div>
-            <div class="card mode-card" data-mode="private">
-              <div class="icon">${MODE_ICONS.private}</div><h3>${MODE_NAMES.private}</h3>
-              <p>Tạo phòng và mời bạn bè bằng mã phòng hoặc đường link.</p>
-              <button class="btn primary mode-cta" id="create-room">Tạo phòng</button>
-              <div class="join-row">
-                <input class="input" id="room-code" placeholder="Mã phòng / link mời" />
-                <button class="btn" id="join-room">Vào</button>
+          <div class="lobby-body">
+            <aside class="room-browser" aria-label="${this.isAdmin ? 'Phòng đang mở và trận đang đấu' : 'Phòng đang mở'}">
+              <div class="card room-browser-card">
+                ${this.isAdmin
+                  ? `<div class="browser-tabs" role="tablist" aria-label="Danh sách">
+                      <button type="button" role="tab" data-tab="rooms" aria-selected="${this.browserTab === 'rooms'}">🏮 Phòng chờ <span class="badge" id="room-count"></span></button>
+                      <button type="button" role="tab" data-tab="live" aria-selected="${this.browserTab === 'live'}" title="Chỉ quản trị viên thấy">⚔️ Đang đấu <span class="badge" id="live-count"></span></button>
+                    </div>`
+                  : '<div class="room-browser-head"><h3>🏮 Phòng đang mở</h3><span class="badge" id="room-count"></span></div>'}
+                <p class="room-browser-sum muted" id="room-sum"></p>
+                <div class="room-list ui-scroll" id="room-list" aria-live="polite"></div>
+                <button class="btn primary block" id="browser-create">＋ Tạo phòng mới</button>
+              </div>
+            </aside>
+            <div class="modes">
+              <div class="card mode-card" data-mode="pvp">
+                <div class="icon">${MODE_ICONS.pvp}</div><h3>${MODE_NAMES.pvp}</h3>
+                <p>Ghép trận tự động trên bản đồ ${esc(MAP_DEFS[DEFAULT_MAP].name)}.</p>
+                <div class="diff-seg" role="radiogroup" aria-label="Kiểu ghép trận">
+                  ${TEAM_SIZES.map((n) => `<button type="button" role="radio" data-team="${n}" aria-checked="${n === team}">${TEAM_SIZE_NAMES[n]}</button>`).join('')}
+                </div>
+                <div class="ornament"></div>
+                <span class="btn primary mode-cta" id="pvp-cta">${team === 1 ? 'Tìm trận' : 'Lập nhóm'}</span>
+              </div>
+              <div class="card mode-card" data-mode="bots">
+                <div class="icon">${MODE_ICONS.bots}</div><h3>${MODE_NAMES.bots}</h3>
+                <p>Vào trận ngay, bot lấp đầy bản đồ bạn chọn.</p>
+                <div class="diff-seg" role="radiogroup" aria-label="Độ khó của bot">
+                  ${BOT_DIFFICULTIES.map((d) => `<button type="button" role="radio" data-diff="${d}" aria-checked="${d === savedBotDifficulty()}">${BOT_DIFFICULTY_NAMES[d]}</button>`).join('')}
+                </div>
+                <div class="ornament"></div>
+                <span class="btn primary mode-cta">Chọn bản đồ</span>
+              </div>
+              <div class="card mode-card" data-mode="private">
+                <div class="icon">${MODE_ICONS.private}</div><h3>${MODE_NAMES.private}</h3>
+                <p>Tạo phòng có tên riêng. Mọi người vào từ danh sách phòng, bạn bè vào bằng mã hoặc link.</p>
+                <div class="ornament"></div>
+                <button class="btn primary mode-cta" id="create-room">Tạo phòng</button>
+                <div class="join-row">
+                  <input class="input" id="room-code" placeholder="Mã phòng / link mời" />
+                  <button class="btn" id="join-room">Vào</button>
+                </div>
+              </div>
+              <div class="card mode-card" data-mode="training">
+                <div class="icon">${MODE_ICONS.training}</div><h3>${MODE_NAMES.training}</h3>
+                <p>Cung, nỏ và tên được cấp miễn phí. Bắn lợn rừng chạy qua lại ở các làn bia từ ${TRAINING_LANES[0].distance} đến ${TRAINING_LANES[TRAINING_LANES.length - 1].distance}. Không tính điểm, không mất máu.</p>
+                <div class="ornament"></div>
+                <span class="btn primary mode-cta">Vào tập bắn</span>
               </div>
             </div>
           </div>
-          <nav class="lobby-menu">
-            <button class="menu-tile" data-nav="profile"><span>👤</span>Hồ sơ</button>
-            <button class="menu-tile" data-nav="history"><span>📜</span>Lịch sử</button>
-            <button class="menu-tile" data-nav="guide"><span>📖</span>Hướng dẫn</button>
-            <button class="menu-tile" data-nav="items"><span>🎒</span>Vật phẩm</button>
-            <button class="menu-tile" data-nav="keys"><span>⌨️</span>Phím tắt</button>
-            <button class="menu-tile" data-nav="settings"><span>⚙️</span>Cài đặt</button>
-          </nav>
         </div>
       </div></div>`);
     this.bindNav();
-    this.ui.querySelector('[data-mode="pvp"]')!.addEventListener('click', () => {
+    this.renderRoomList();
+    $('#browser-create').addEventListener('click', () => this.openCreateRoom());
+    $('#room-list').addEventListener('click', (e) => {
+      const target = e.target as HTMLElement;
+      const watch = target.closest<HTMLButtonElement>('[data-watch]');
+      if (watch) {
+        unlockAudio();
+        this.send('observe:start', watch.dataset.watch, true);
+        return;
+      }
+      const row = target.closest<HTMLButtonElement>('[data-join]');
+      if (!row || row.disabled) return;
       unlockAudio();
-      this.send('queue:join', undefined, true);
+      this.send('room:join', row.dataset.join, true);
     });
-    this.ui.querySelector('[data-mode="bots"]')!.addEventListener('click', () => {
+    this.ui.querySelectorAll<HTMLElement>('.browser-tabs [data-tab]').forEach((tab) =>
+      tab.addEventListener('click', () => {
+        this.browserTab = tab.dataset.tab === 'live' ? 'live' : 'rooms';
+        this.ui.querySelectorAll<HTMLElement>('.browser-tabs [data-tab]').forEach((t) => t.setAttribute('aria-selected', String(t === tab)));
+        this.renderRoomList();
+      }),
+    );
+    this.ui.querySelector('[data-mode="pvp"]')!.addEventListener('click', (e) => {
+      const pick = (e.target as HTMLElement).closest<HTMLElement>('[data-team]');
+      if (pick) {
+        const n = Number(pick.dataset.team);
+        if (!isTeamSize(n)) return;
+        localStorage.setItem(TEAM_SIZE_KEY, String(n));
+        this.ui.querySelectorAll<HTMLElement>('[data-team]').forEach((b) => b.setAttribute('aria-checked', String(b === pick)));
+        $('#pvp-cta').textContent = n === 1 ? 'Tìm trận' : 'Lập nhóm';
+        return;
+      }
       unlockAudio();
-      this.send('bot:start', undefined, true);
+      const size = savedTeamSize();
+      if (size === 1) this.send('queue:join', undefined, true);
+      else this.send('party:create', size, true);
+    });
+    this.ui.querySelector('[data-mode="bots"]')!.addEventListener('click', (e) => {
+      const diff = (e.target as HTMLElement).closest<HTMLElement>('[data-diff]');
+      if (!diff) return this.openMapPicker();
+      localStorage.setItem(BOT_DIFFICULTY_KEY, diff.dataset.diff!);
+      this.ui.querySelectorAll<HTMLElement>('[data-diff]').forEach((b) => b.setAttribute('aria-checked', String(b === diff)));
+    });
+    this.ui.querySelector('[data-mode="training"]')!.addEventListener('click', () => {
+      unlockAudio();
+      this.send('training:start', undefined, true);
     });
     $('#create-room').addEventListener('click', (e) => {
       e.stopPropagation();
-      this.send('room:create', undefined, true);
+      this.openCreateRoom();
     });
     const joinInput = $('#room-code') as HTMLInputElement;
     joinInput.addEventListener('click', (e) => e.stopPropagation());
@@ -510,32 +860,243 @@ export class App {
     joinInput.addEventListener('keydown', (e) => e.key === 'Enter' && join(e));
   }
 
+  private openMapPicker() {
+    if (this.ui.querySelector('.map-picker')) return;
+    let choice = savedMapChoice();
+    const box = document.createElement('div');
+    box.className = 'overlay map-picker';
+    box.innerHTML = `<div class="card">
+      <h2>🗺️ Chọn bản đồ</h2>
+      <p class="muted">Cây cối, nhà cửa cố định theo bản đồ; vật phẩm mỗi trận rải ngẫu nhiên.</p>
+      <div class="map-grid">${MAP_CHOICES.map((id) => mapTile(id, id === choice, false, false)).join('')}</div>
+      <div class="row btn-pair">
+        <button class="btn" data-a="cancel">Hủy</button>
+        <button class="btn primary" data-a="go">▶ Vào trận</button>
+      </div></div>`;
+    const close = () => {
+      box.remove();
+      window.removeEventListener('keydown', onKey);
+    };
+    const go = () => {
+      localStorage.setItem(MAP_CHOICE_KEY, choice);
+      unlockAudio();
+      if (this.send('bot:start', { map: choice, difficulty: savedBotDifficulty() }, true)) close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (!box.isConnected) return window.removeEventListener('keydown', onKey);
+      if (e.key === 'Escape') close();
+      if (e.key === 'Enter') go();
+    };
+    box.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement;
+      if (t === box) return close();
+      const tile = t.closest<HTMLElement>('[data-map]');
+      if (tile && isMapChoice(tile.dataset.map)) {
+        if (tile.dataset.map === choice && e.detail > 1) return go();
+        choice = tile.dataset.map;
+        box.querySelectorAll('[data-map]').forEach((b) => b.classList.toggle('active', b === tile));
+        return;
+      }
+      const a = t.closest<HTMLElement>('[data-a]')?.dataset.a;
+      if (a === 'cancel') close();
+      if (a === 'go') go();
+    });
+    window.addEventListener('keydown', onKey);
+    this.ui.appendChild(box);
+    paintPreviews(box);
+    box.querySelector<HTMLElement>('[data-a="go"]')?.focus();
+  }
+
+  /** Fills the lobby's room list; only this box redraws when the server pushes a new list. */
+  private renderRoomList() {
+    const box = this.ui.querySelector<HTMLElement>('#room-list');
+    if (!box) return;
+    const list = this.roomList;
+    const count = this.ui.querySelector<HTMLElement>('#room-count');
+    if (count) count.textContent = list ? String(list.length) : '…';
+    const liveCount = this.ui.querySelector<HTMLElement>('#live-count');
+    if (liveCount) liveCount.textContent = this.liveMatches ? String(this.liveMatches.length) : '…';
+    const live = this.isAdmin && this.browserTab === 'live';
+    const create = this.ui.querySelector<HTMLElement>('#browser-create');
+    if (create) create.hidden = live;
+    if (live) return this.renderLiveList(box);
+    const sum = this.ui.querySelector<HTMLElement>('#room-sum');
+    if (sum) {
+      const humans = list?.reduce((n, r) => n + r.humans, 0) ?? 0;
+      sum.textContent = list?.length ? `${list.length} phòng · ${humans} người đang chờ` : '';
+      sum.hidden = !list?.length;
+    }
+    if (!list) {
+      box.innerHTML = '<p class="room-empty muted">Đang tải danh sách phòng…</p>';
+      return;
+    }
+    if (!list.length) {
+      box.innerHTML = `<div class="room-empty"><div class="room-empty-icon" aria-hidden="true">🏮</div>
+        <b>Chưa có phòng nào đang mở</b><span class="muted">Tạo phòng để rủ mọi người cùng chơi!</span></div>`;
+      return;
+    }
+    box.innerHTML = list.map((r) => {
+      const full = r.players >= r.max;
+      const map = mapInfo(r.map);
+      const team = isTeamSize(r.teamSize) ? TEAM_SIZE_NAMES[r.teamSize] : TEAM_SIZE_NAMES[1];
+      const bots = r.players - r.humans;
+      const free = Math.max(0, r.max - r.players);
+      const fill = r.max > 0 ? Math.min(100, Math.max(3, (r.players / r.max) * 100)) : 100;
+      const crowd = full ? 'full' : r.players / r.max >= 0.8 ? 'busy' : r.humans >= 2 ? 'lively' : '';
+      const summary = `${r.humans} người chơi${bots ? `, ${bots} bot` : ''} · ${full ? 'đã đầy' : `còn ${free}/${r.max} chỗ`}`;
+      return `<button type="button" class="room-row${full ? ' full' : ''}" data-join="${esc(r.id)}" ${full ? 'disabled' : ''}
+          title="${esc(`${r.name} · chủ phòng ${r.host.name} · ${summary}`)}" aria-label="${esc(`${r.name}, ${summary}`)}">
+        <span class="room-row-name">${esc(r.name)}</span>
+        <span class="room-row-count ${crowd}"><b>👥 ${r.humans}</b><small>người</small></span>
+        <span class="room-row-meta"><span class="room-row-host">${esc(r.host.avatar)} ${nameHtml(r.host.name, r.host.admin, false)}</span>
+          <span>${map.icon} ${esc(map.name)} · ${esc(team)}</span></span>
+        <span class="room-row-go">${full ? 'Đầy' : 'Vào ›'}</span>
+        <span class="room-row-cap" aria-hidden="true">
+          <span class="room-row-fill"><i class="${crowd}" style="width:${fill.toFixed(1)}%"></i></span>
+          <span class="room-row-slots">${bots ? `🤖 ${bots} · ` : ''}${full ? 'hết chỗ' : `còn ${free} chỗ`}</span>
+        </span>
+      </button>`;
+    }).join('');
+  }
+
+  /** Admin tab of the room browser: matches being played, each one open to watch. */
+  private renderLiveList(box: HTMLElement) {
+    const list = this.liveMatches;
+    const sum = this.ui.querySelector<HTMLElement>('#room-sum');
+    if (sum) {
+      const humans = list?.reduce((n, m) => n + m.humans, 0) ?? 0;
+      sum.textContent = list?.length ? `${list.length} trận · ${humans} người đang chơi · chỉ quản trị viên thấy` : '';
+      sum.hidden = !list?.length;
+    }
+    if (!list) {
+      box.innerHTML = '<p class="room-empty muted">Đang tải danh sách trận…</p>';
+      return;
+    }
+    if (!list.length) {
+      box.innerHTML = `<div class="room-empty"><div class="room-empty-icon" aria-hidden="true">⚔️</div>
+        <b>Chưa có trận nào đang đấu</b><span class="muted">Trận ghép, đấu bot và phòng bạn bè sẽ hiện ở đây khi bắt đầu.</span></div>`;
+      return;
+    }
+    box.innerHTML = list.map((m) => {
+      const map = mapInfo(m.mapId);
+      const title = m.name || MODE_NAMES[m.mode];
+      const team = isTeamSize(m.teamSize) ? TEAM_SIZE_NAMES[m.teamSize] : TEAM_SIZE_NAMES[1];
+      const bots = m.players - m.humans;
+      const fill = m.players > 0 ? Math.min(100, Math.max(3, (m.alive / m.players) * 100)) : 0;
+      const clock = m.lobby ? '🏯 Phòng chờ' : `⏱ ${formatDuration(m.elapsedMs)}`;
+      const summary = `${m.alive}/${m.players} còn sống · ${m.humans} người chơi${bots > 0 ? `, ${bots} bot` : ''}`;
+      return `<button type="button" class="room-row live-row" data-watch="${esc(m.id)}"
+          title="${esc(`${title} · ${MODE_NAMES[m.mode]} · ${summary}`)}" aria-label="${esc(`Xem trận ${title}, ${summary}`)}">
+        <span class="room-row-name">${LIVE_MODE_ICONS[m.mode]} ${esc(title)}</span>
+        <span class="room-row-count lively"><b>❤️ ${m.alive}</b><small>còn sống</small></span>
+        <span class="room-row-meta"><span>${esc(MODE_NAMES[m.mode])} · ${esc(team)}</span>
+          <span>${map.icon} ${esc(map.name)} · 👤 ${m.humans}${bots > 0 ? ` · 🤖 ${bots}` : ''}</span></span>
+        <span class="room-row-go">👁 Xem ›</span>
+        <span class="room-row-cap" aria-hidden="true">
+          <span class="room-row-fill"><i class="lively" style="width:${fill.toFixed(1)}%"></i></span>
+          <span class="room-row-slots">${clock}${m.observers ? ` · 🛡️ ${m.observers}` : ''}</span>
+        </span>
+      </button>`;
+    }).join('');
+  }
+
+  private openCreateRoom() {
+    if (document.querySelector('.create-room')) return;
+    let teamSize = savedRoomTeam();
+    const listed = localStorage.getItem(ROOM_LISTED_KEY) !== '0';
+    const box = html(`<div class="overlay create-room" role="dialog" aria-modal="true" aria-labelledby="create-room-title">
+      <form class="card" novalidate>
+        <h2 id="create-room-title">🏮 Tạo phòng</h2>
+        <div class="field"><label for="new-room-name">Tên phòng</label>
+          <input class="input" id="new-room-name" maxlength="${ROOM_NAME_MAX_LENGTH}" autocomplete="off"
+            placeholder="Phòng của ${esc(this.user!.username)}" value="${esc(localStorage.getItem(ROOM_NAME_KEY) ?? '')}" />
+          <small class="muted field-hint"><span id="new-room-len">0</span>/${ROOM_NAME_MAX_LENGTH} ký tự · để trống sẽ dùng tên mặc định</small></div>
+        <div class="field"><label>Kiểu đội</label>
+          <div class="diff-seg room-team-seg" role="radiogroup" aria-label="Kiểu đội">
+            ${TEAM_SIZES.map((n) => `<button type="button" role="radio" data-size="${n}" aria-checked="${n === teamSize}">${TEAM_SIZE_NAMES[n]}</button>`).join('')}
+          </div></div>
+        <label class="switch-row">
+          <input type="checkbox" id="new-room-listed" ${listed ? 'checked' : ''} />
+          <span class="switch" aria-hidden="true"></span>
+          <span><b>Hiện ở danh sách phòng ngoài sảnh</b><small class="muted">Tắt: chỉ người có mã phòng hoặc link mời mới vào được.</small></span>
+        </label>
+        <div class="row btn-pair">
+          <button type="button" class="btn" data-a="cancel">Hủy</button>
+          <button type="submit" class="btn primary">Tạo phòng</button>
+        </div>
+      </form></div>`);
+    const form = box.querySelector('form')!;
+    const name = box.querySelector<HTMLInputElement>('#new-room-name')!;
+    const len = box.querySelector<HTMLElement>('#new-room-len')!;
+    const showLen = () => (len.textContent = String(name.value.length));
+    showLen();
+    name.addEventListener('input', showLen);
+    const close = () => {
+      box.remove();
+      window.removeEventListener('keydown', onKey, true);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    };
+    box.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement;
+      if (t === box || t.closest('[data-a="cancel"]')) return close();
+      const pick = t.closest<HTMLElement>('[data-size]');
+      const n = Number(pick?.dataset.size);
+      if (!pick || !isTeamSize(n)) return;
+      teamSize = n;
+      box.querySelectorAll<HTMLElement>('[data-size]').forEach((b) => b.setAttribute('aria-checked', String(b === pick)));
+    });
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const listedNow = box.querySelector<HTMLInputElement>('#new-room-listed')!.checked;
+      const roomName = name.value.trim();
+      localStorage.setItem(ROOM_TEAM_KEY, String(teamSize));
+      localStorage.setItem(ROOM_LISTED_KEY, listedNow ? '1' : '0');
+      localStorage.setItem(ROOM_NAME_KEY, roomName);
+      unlockAudio();
+      if (this.send('room:create', { teamSize, name: roomName, listed: listedNow }, true)) close();
+    });
+    window.addEventListener('keydown', onKey, true);
+    document.body.appendChild(box);
+    name.focus();
+    name.select();
+  }
+
   // ---------------------------------------------------------------- queue
 
   private showQueue() {
     const q = this.queue!;
     const first = this.screen !== 'queue';
     if (first) {
+      const teamName = isTeamSize(q.teamSize) ? TEAM_SIZE_NAMES[q.teamSize] : TEAM_SIZE_NAMES[1];
+      const partyLine = q.party
+        ? `Nhóm ${q.party.members}/${q.teamSize} người · ${q.party.members >= q.teamSize ? 'đã đủ đội' : q.party.fill ? 'ghép thêm người lạ cho đủ đội' : 'không ghép thêm ai'}`
+        : q.teamSize > 1 ? 'Sẽ được ghép với người chơi ngẫu nhiên cho đủ đội' : 'Mỗi người một đội, trụ lại cuối cùng để thắng';
       this.render('queue', `
-        <div class="screen"><div class="container">${this.header()}
-          <div class="narrow" style="margin-top:6vh"><div class="card center">
-            <h2>⚔️ Đang tìm trận</h2>
-            <div class="spinner"></div>
+        <div class="screen fit"><div class="container">${this.header('lobby')}
+          <div class="center-fill"><div class="narrow"><div class="card center">
+            <h2>⚔️ Đang tìm trận <span class="badge gold">${esc(teamName)}</span></h2>
+            <p class="muted q-mode">${esc(partyLine)}</p>
+            ${walker('Đang tìm trận')}
             <div class="logo" style="font-size:42px" id="q-count"></div>
             <p class="muted">Thời gian chờ: <b id="q-time">0:00</b></p>
             <div id="q-notice"></div>
             <div class="spacer"></div>
             <div class="menu-list">
-              <button class="btn" id="q-bots">🤖 Chuyển sang đấu với bot</button>
-              <button class="btn danger" id="q-cancel">Hủy tìm trận</button>
+              ${q.party ? '' : '<button class="btn" id="q-bots">🤖 Chuyển sang đấu với bot</button>'}
+              <button class="btn danger" id="q-cancel">${q.party ? 'Hủy tìm trận (cả nhóm)' : 'Hủy tìm trận'}</button>
             </div>
-          </div></div>
+          </div></div></div>
         </div></div>`);
       this.bindNav();
       $('#q-cancel').addEventListener('click', () => this.send('queue:leave'));
-      $('#q-bots').addEventListener('click', () => {
+      this.ui.querySelector('#q-bots')?.addEventListener('click', () => {
         if (!this.send('queue:leave')) return;
-        this.socket?.emit('bot:start');
+        this.socket?.emit('bot:start', { map: savedMapChoice(), difficulty: savedBotDifficulty() });
       });
       window.clearInterval(this.queueTimer);
       this.queueTimer = window.setInterval(() => {
@@ -557,6 +1118,142 @@ export class App {
       : '';
   }
 
+  // ---------------------------------------------------------------- party (duo / squad)
+
+  private showParty() {
+    const party = this.party!;
+    const me = this.user!.id;
+    const isLeader = party.leaderId === me;
+    const count = party.members.length;
+    const slots = Array.from({ length: party.size }, (_, i) => {
+      const m = party.members[i];
+      if (!m) return `<div class="party-slot empty"><span class="slot-plus" aria-hidden="true">＋</span><small>${party.fill ? 'Ghép ngẫu nhiên' : 'Để trống'}</small></div>`;
+      const tags = [
+        m.admin ? adminBadge() : '',
+        m.id === party.leaderId ? '<span class="badge gold">👑 Trưởng nhóm</span>' : '',
+        m.id === me ? '<span class="badge">Bạn</span>' : '',
+        m.online ? '' : '<span class="badge danger">Mất kết nối</span>',
+      ].join('');
+      return `<div class="party-slot${m.id === me ? ' me' : ''}${m.online ? '' : ' offline'}">
+        <span class="avatar">${esc(m.avatar)}</span>
+        <b title="${esc(m.name)}">${nameHtml(m.name, m.admin, false)}</b>
+        <small class="muted">Cấp ${m.level}</small>
+        <div class="slot-tags">${tags}</div>
+        ${isLeader && m.id !== me ? `<button class="btn small slot-kick" data-kick="${esc(m.id)}" title="Mời ra khỏi nhóm" aria-label="Mời ${esc(m.name)} ra khỏi nhóm">✕</button>` : ''}
+      </div>`;
+    }).join('');
+    const empty = party.size - count;
+    const hint = empty <= 0
+      ? 'Nhóm đã đủ người.'
+      : party.fill
+        ? `Còn ${empty} chỗ trống sẽ được ghép với người chơi ngẫu nhiên.`
+        : `Nhóm sẽ vào trận chỉ với ${count} người, không ghép thêm ai.`;
+    const keepScroll = this.screen === 'party' ? (this.ui.querySelector('#party-friends')?.scrollTop ?? 0) : 0;
+    this.render('party', `
+      <div class="screen fit"><div class="container">${this.header('lobby')}
+        <div class="grid cols-2 fill-grid">
+          <div class="card party-card">
+            <div class="row between party-head">
+              <h2>👥 Nhóm ${party.size} người</h2>
+              ${isLeader ? `<div class="diff-seg party-size" role="radiogroup" aria-label="Số người mỗi đội">
+                ${TEAM_SIZES.filter((n) => n > 1).map((n) => `<button type="button" role="radio" data-size="${n}" aria-checked="${n === party.size}" ${n < count ? 'disabled' : ''}>${TEAM_SIZE_NAMES[n]}</button>`).join('')}
+              </div>` : ''}
+            </div>
+            <p class="muted">Ghép trận tự động trên bản đồ ${esc(MAP_DEFS[DEFAULT_MAP].name)}. Đồng đội không bắn trúng nhau, đội trụ lại cuối cùng giành chiến thắng.</p>
+            <div class="party-slots size-${party.size}">${slots}</div>
+            <label class="switch-row${isLeader ? '' : ' readonly'}">
+              <input type="checkbox" id="party-fill" ${party.fill ? 'checked' : ''} ${isLeader ? '' : 'disabled'} />
+              <span class="switch" aria-hidden="true"></span>
+              <span><b>Ghép thêm người lạ cho đủ đội</b><small class="muted">${party.fill ? 'Bật: chỗ trống được ghép với người chơi ngẫu nhiên.' : 'Tắt: chỉ đi cùng những người đang trong nhóm.'}</small></span>
+            </label>
+            <div class="spacer"></div>
+            ${isLeader
+              ? `<button class="btn primary big block" id="party-queue">⚔️ Tìm trận</button><p class="muted center party-hint">${esc(hint)}</p>`
+              : `<p class="center muted party-hint">Đang chờ trưởng nhóm bắt đầu tìm trận…<br/>${esc(hint)}</p>`}
+            <button class="btn danger block" id="party-leave">Rời nhóm</button>
+          </div>
+          <div class="card fill-card">
+            <h2>✉️ Mời bạn bè</h2>
+            <div class="card-scroll ui-scroll" id="party-friends"></div>
+            <div class="spacer"></div>
+            <button class="btn block" id="party-link">🔗 Sao chép link mời vào nhóm</button>
+            <p class="muted compact-hide">Gửi link cho bạn bè, người chưa có tài khoản sẽ được yêu cầu đăng ký rồi tự vào nhóm.</p>
+          </div>
+        </div>
+      </div></div>`);
+    this.renderPartyFriends();
+    $('#party-friends').scrollTop = keepScroll;
+    this.bindNav();
+    $('#party-leave').addEventListener('click', () => this.send('party:leave'));
+    $('#party-link').addEventListener('click', () => void this.copyText(`${location.origin}/?party=${party.id}`, 'link mời vào nhóm'));
+    $('#party-friends').addEventListener('click', (e) => {
+      const id = (e.target as HTMLElement).closest<HTMLElement>('[data-invite]')?.dataset.invite;
+      if (id) this.send('party:invite', id);
+    });
+    if (!isLeader) return;
+    $('#party-queue').addEventListener('click', () => {
+      unlockAudio();
+      this.send('party:queue', undefined, true);
+    });
+    ($('#party-fill') as HTMLInputElement).addEventListener('change', (e) => this.send('party:setFill', (e.target as HTMLInputElement).checked));
+    this.ui.querySelector('.party-size')?.addEventListener('click', (e) => {
+      const n = Number((e.target as HTMLElement).closest<HTMLElement>('[data-size]')?.dataset.size);
+      if (isTeamSize(n) && n > 1 && n !== party.size) {
+        localStorage.setItem(TEAM_SIZE_KEY, String(n));
+        this.send('party:setSize', n);
+      }
+    });
+    this.ui.querySelectorAll<HTMLElement>('[data-kick]').forEach((b) =>
+      b.addEventListener('click', () => this.send('party:kick', b.dataset.kick)),
+    );
+  }
+
+  /** Online friends first; only the list redraws when presence changes. */
+  private renderPartyFriends() {
+    const box = this.ui.querySelector<HTMLElement>('#party-friends');
+    const party = this.party;
+    if (!box || !party) return;
+    const order = { online: 0, in_match: 1, offline: 2 } as const;
+    const friends = [...this.social.state.friends].sort((a, b) => order[a.presence] - order[b.presence] || a.username.localeCompare(b.username));
+    if (!friends.length) {
+      box.innerHTML = '<p class="muted">Bạn chưa có bạn bè nào. Mở khung trò chuyện để kết bạn, hoặc gửi link mời bên dưới.</p>';
+      return;
+    }
+    const full = party.members.length >= party.size;
+    const now = Date.now();
+    box.innerHTML = `<div class="grid">${friends.map((f) => {
+      const inParty = party.members.some((m) => m.id === f.id);
+      const sent = now - (this.invitedAt.get(f.id) ?? 0) < INVITE_SENT_MS;
+      const action = inParty
+        ? '<span class="badge gold">Trong nhóm</span>'
+        : `<button class="btn small${sent ? '' : ' primary'}" data-invite="${esc(f.id)}" ${f.presence !== 'online' || full || sent ? 'disabled' : ''}>${sent ? 'Đã mời' : 'Mời'}</button>`;
+      return `<div class="member${f.presence === 'offline' ? ' dim' : ''}">
+        <span class="avatar">${esc(f.avatar)}</span>
+        <div class="grow"><b>${nameHtml(f.username, f.admin)}</b>
+          <div class="muted presence-line"><i class="dot ${f.presence}"></i>${PRESENCE_TEXT[f.presence]} · Cấp ${f.level}</div></div>
+        ${action}
+      </div>`;
+    }).join('')}</div>`;
+    if ([...this.invitedAt.values()].some((t) => now - t < INVITE_SENT_MS)) {
+      window.setTimeout(() => this.screen === 'party' && this.renderPartyFriends(), INVITE_SENT_MS + 100);
+    }
+  }
+
+  private async onPartyInvite(msg: PartyInviteMsg) {
+    if (this.screen === 'game' || this.party?.id === msg.partyId) return;
+    const ok = await confirmDialog({
+      title: `${msg.from.avatar} ${msg.from.username} mời bạn vào nhóm`,
+      message: `Cùng ghép trận ${TEAM_SIZE_NAMES[isTeamSize(msg.size) ? msg.size : 2]} trên bản đồ ${MAP_DEFS[DEFAULT_MAP].name}.${this.party ? ' Bạn sẽ rời nhóm hiện tại.' : this.queue?.inQueue ? ' Bạn sẽ rời hàng chờ hiện tại.' : ''}`,
+      confirmText: 'Vào nhóm',
+      cancelText: 'Để sau',
+    });
+    // a match may have started while the dialog was open
+    if (!ok || (this.screen as Screen) === 'game') return;
+    if (this.queue?.inQueue && !this.send('queue:leave')) return;
+    if (this.party) this.send('party:leave');
+    this.send('party:join', msg.partyId, true);
+  }
+
   // ---------------------------------------------------------------- private room
 
   private showRoom() {
@@ -565,56 +1262,126 @@ export class App {
     const isHost = room.hostId === me;
     const link = `${location.origin}/?room=${room.id}`;
     const total = room.members.length;
-    const members = room.members
-      .map((m) => `
+    const botCount = room.members.filter((m) => m.isBot).length;
+    const teamSize = isTeamSize(room.teamSize) ? room.teamSize : 1;
+    const tags = (m: RoomMember) =>
+      `${m.admin ? adminBadge() : ''} ${m.id === room.hostId ? '<span class="badge gold">👑 Chủ phòng</span>' : ''} ${m.isBot ? '<span class="badge">BOT</span>' : ''} ${m.id === me ? '<span class="badge">Bạn</span>' : ''}`;
+    const removeBtn = (m: RoomMember) => (isHost && m.isBot ? `<button class="btn small" data-remove="${esc(m.id)}">Xóa</button>` : '');
+    let members: string;
+    let teamsWithPlayers = 0;
+    const unseated = room.members.filter((m) => m.slot === null);
+    const iAmUnseated = unseated.some((m) => m.id === me);
+    if (teamSize === 1) {
+      members = `<div class="grid">${[...room.members].sort((a, b) => (a.slot ?? Infinity) - (b.slot ?? Infinity)).map((m) => `
         <div class="member">
           <span class="avatar">${esc(m.avatar)}</span>
-          <div class="grow"><b>${esc(m.name)}</b> ${m.id === room.hostId ? '<span class="badge gold">👑 Chủ phòng</span>' : ''} ${m.isBot ? '<span class="badge">BOT</span>' : ''} ${m.id === me ? '<span class="badge">Bạn</span>' : ''}
+          <div class="grow"><b>${nameHtml(m.name, m.admin, false)}</b> ${tags(m)}
             <div class="muted" style="font-size:12px">Cấp ${m.level}</div></div>
-          ${isHost && m.isBot ? `<button class="btn small" data-remove="${esc(m.id)}">Xóa</button>` : ''}
-        </div>`)
-      .join('');
+          ${removeBtn(m)}
+        </div>`).join('')}</div>`;
+    } else {
+      // every slot of every team is drawn so players can move themselves into any empty one
+      const bySlot = new Map(room.members.filter((m) => m.slot !== null).map((m) => [m.slot!, m]));
+      const mySlot = room.members.find((m) => m.id === me)?.slot ?? undefined;
+      const teamCount = Math.ceil(room.max / teamSize);
+      const waiting = unseated.length
+        ? `<div class="room-unseated${iAmUnseated ? ' mine' : ''}">
+            <div class="room-team-head"><b>Chưa chọn đội</b><small>${unseated.length}</small></div>
+            ${iAmUnseated ? '<p class="room-pick-hint">👇 Bấm "Vào ô này" ở đội bạn muốn tham gia.</p>' : ''}
+            <div class="room-unseated-list">${unseated.map((m) => `<span class="room-chip${m.id === me ? ' me' : ''}"><span class="avatar">${esc(m.avatar)}</span>${nameHtml(m.name, m.admin, false)}</span>`).join('')}</div>
+          </div>`
+        : '';
+      members = `${waiting}<div class="room-teams">${Array.from({ length: teamCount }, (_, t) => {
+        const slots = Array.from({ length: Math.min(teamSize, room.max - t * teamSize) }, (_, i) => t * teamSize + i);
+        const seated = slots.filter((s) => bySlot.has(s)).length;
+        if (seated) teamsWithPlayers++;
+        const mine = mySlot !== undefined && Math.floor(mySlot / teamSize) === t;
+        return `<div class="room-team${mine ? ' mine' : ''}${seated ? '' : ' empty'}">
+          <div class="room-team-head"><b>Đội ${t + 1}</b><small>${seated}/${slots.length}</small></div>
+          ${slots.map((s) => {
+            const m = bySlot.get(s);
+            if (!m) return `<button type="button" class="room-slot open" data-slot="${s}" title="Chuyển vào ô này">＋ <span>Vào ô này</span></button>`;
+            return `<div class="room-slot${m.id === me ? ' me' : ''}">
+              <span class="avatar">${esc(m.avatar)}</span>
+              <div class="grow"><b title="${esc(m.name)}">${nameHtml(m.name, m.admin, false)}</b><div class="slot-tags">${tags(m)}</div></div>
+              ${isHost && m.isBot ? `<button class="btn small" data-remove="${esc(m.id)}" title="Xóa bot" aria-label="Xóa ${esc(m.name)}">✕</button>` : ''}
+            </div>`;
+          }).join('')}
+        </div>`;
+      }).join('')}</div>`;
+    }
+    const needSeats = teamSize > 1 && unseated.length > 0;
+    const needTeams = teamSize > 1 && teamsWithPlayers < 2;
+    const canStart = total >= room.min && !needSeats && !needTeams;
+    const startHint = total < room.min
+      ? `Cần ít nhất ${room.min} người (có thể thêm bot).`
+      : needSeats ? `Còn ${unseated.length} người chưa chọn đội.`
+        : needTeams ? 'Cần ít nhất 2 đội có người. Chuyển sang ô của đội khác hoặc thêm bot.' : '';
+    // the room re-renders on every member change, so keep the list where the player scrolled it
+    const keepScroll = this.screen === 'room' ? (this.ui.querySelector('#room-members')?.scrollTop ?? 0) : 0;
     this.render('room', `
-      <div class="screen"><div class="container">${this.header()}
-        <div class="grid cols-2">
+      <div class="screen fit"><div class="container">${this.header('lobby')}
+        <div class="grid cols-2 fill-grid">
           <div class="card">
-            <h2>👥 Phòng bạn bè</h2>
+            <h2 class="room-title" title="${esc(room.name)}">🏮 ${esc(room.name)}</h2>
+            <p class="muted room-visibility">${room.listed ? '🌐 Đang hiện ở danh sách phòng ngoài sảnh, ai cũng vào được.' : '🔒 Phòng kín: chỉ vào được bằng mã phòng hoặc link mời.'}</p>
             <div class="field"><label>Mã phòng</label><div class="code">${esc(room.id)}</div></div>
-            <div class="field"><label>Link mời</label><div class="code">${esc(link)}</div></div>
-            <div class="row">
+            <div class="field compact-hide"><label>Link mời</label><div class="code">${esc(link)}</div></div>
+            <div class="row btn-pair">
               <button class="btn" id="copy-code">📋 Sao chép mã</button>
               <button class="btn" id="copy-link">🔗 Sao chép link mời</button>
             </div>
-            <p class="muted">Gửi mã hoặc link cho bạn bè. Người chưa có tài khoản sẽ được yêu cầu đăng ký rồi tự vào phòng.</p>
+            <p class="muted compact-hide">Gửi mã hoặc link cho bạn bè. Người chưa có tài khoản sẽ được yêu cầu đăng ký rồi tự vào phòng.</p>
+            <div class="field"><label>Kiểu đội${isHost ? '' : ' <span class="muted">(chủ phòng chọn)</span>'}</label>
+              <div class="diff-seg room-team-seg" role="radiogroup" aria-label="Kiểu đội" id="room-team-size">
+                ${TEAM_SIZES.map((n) => `<button type="button" role="radio" data-size="${n}" aria-checked="${n === teamSize}" ${isHost ? '' : 'disabled'}>${TEAM_SIZE_NAMES[n]}</button>`).join('')}
+              </div>
+            </div>
+            <div class="field"><label>Bản đồ${isHost ? '' : ' <span class="muted">(chủ phòng chọn)</span>'}</label>
+              <div class="map-grid compact" id="room-maps">${MAP_CHOICES.map((id) => mapTile(id, id === room.map, true, !isHost || mapCapacity(id) < total)).join('')}</div>
+            </div>
           </div>
-          <div class="card">
-            <div class="row between"><h2>Người chơi (${total}/${room.max})</h2></div>
-            <div class="grid">${members}</div>
+          <div class="card fill-card">
+            <h2>Người chơi (${total}/${room.max})${teamSize > 1 ? ` <span class="badge">${teamsWithPlayers} đội có người</span>` : ''}</h2>
+            ${teamSize > 1 ? '<p class="muted room-team-hint">Mỗi người tự bấm vào ô trống của đội mình muốn. Đồng đội không bắn trúng nhau.</p>' : ''}
+            <div class="card-scroll ui-scroll" id="room-members">${members}</div>
             <div class="spacer"></div>
             ${isHost ? `
-              <div class="row">
+              <div class="row btn-pair">
                 <button class="btn" id="add-bot" ${total >= room.max ? 'disabled' : ''}>🤖 Thêm bot</button>
                 <button class="btn" id="fill-bots" ${total >= room.max ? 'disabled' : ''}>Thêm bot cho đủ ${room.max}</button>
               </div>
+              ${botCount ? '<div class="spacer"></div><button class="btn block" id="clear-bots">🧹 Xóa hết bot</button>' : ''}
               <div class="spacer"></div>
-              <button class="btn primary big block" id="start-room" ${total < room.min ? 'disabled' : ''}>▶ Bắt đầu (${total}/${room.max})</button>
-              ${total < room.min ? `<p class="muted center">Cần ít nhất ${room.min} người (có thể thêm bot).</p>` : ''}`
+              <button class="btn primary big block" id="start-room" ${canStart ? '' : 'disabled'}>▶ Bắt đầu (${total}/${room.max})</button>
+              ${startHint ? `<p class="muted center">${startHint}</p>` : ''}`
               : '<p class="center muted">Đang chờ chủ phòng bắt đầu trận…</p>'}
             <div class="spacer"></div>
             <button class="btn danger block" id="leave-room">Rời phòng</button>
           </div>
         </div>
       </div></div>`);
+    $('#room-members').scrollTop = keepScroll;
+    paintPreviews($('#room-maps'));
     this.bindNav();
     $('#copy-code').addEventListener('click', () => void this.copyText(room.id, 'mã phòng'));
     $('#copy-link').addEventListener('click', () => void this.copyText(link, 'link mời'));
     $('#leave-room').addEventListener('click', () => this.send('room:leave'));
+    $('#room-members').addEventListener('click', (e) => {
+      const slot = (e.target as HTMLElement).closest<HTMLElement>('[data-slot]')?.dataset.slot;
+      if (slot !== undefined) this.send('room:move', Number(slot));
+    });
     if (isHost) {
-      $('#add-bot').addEventListener('click', () => this.send('room:addBot'));
-      $('#fill-bots').addEventListener('click', () => {
-        if (!this.send('room:addBot')) return;
-        for (let i = total + 1; i < room.max; i++) this.socket?.emit('room:addBot');
+      $('#room-team-size').addEventListener('click', (e) => {
+        const n = Number((e.target as HTMLElement).closest<HTMLElement>('[data-size]')?.dataset.size);
+        if (isTeamSize(n) && n !== teamSize) {
+          localStorage.setItem(ROOM_TEAM_KEY, String(n));
+          this.send('room:setTeamSize', n);
+        }
       });
+      $('#add-bot').addEventListener('click', () => this.send('room:addBot'));
+      $('#fill-bots').addEventListener('click', () => this.send('room:fillBots'));
+      this.ui.querySelector('#clear-bots')?.addEventListener('click', () => this.send('room:clearBots'));
       $('#start-room').addEventListener('click', () => {
         unlockAudio();
         this.send('room:start', undefined, true);
@@ -622,16 +1389,20 @@ export class App {
       this.ui.querySelectorAll<HTMLElement>('[data-remove]').forEach((b) =>
         b.addEventListener('click', () => this.send('room:removeBot', b.dataset.remove)),
       );
+      $('#room-maps').addEventListener('click', (e) => {
+        const map = (e.target as HTMLElement).closest<HTMLElement>('[data-map]')?.dataset.map;
+        if (isMapChoice(map) && map !== room.map) this.send('room:setMap', map);
+      });
     }
   }
 
   // ---------------------------------------------------------------- profile & history
 
   private async showProfile() {
-    this.render('profile', `<div class="screen"><div class="container">${this.header()}<div class="card"><div class="spinner"></div></div></div></div>`);
+    this.render('profile', `<div class="screen fit"><div class="container">${this.header('profile')}<div class="center-fill">${walker('Đang tải hồ sơ')}</div></div></div>`);
     this.bindNav();
     try {
-      const [{ user }, { stats }] = await Promise.all([api.me(), api.stats()]);
+      const [{ user }, { stats }, history] = await Promise.all([api.me(), api.stats(), api.history(HISTORY_PAGE_SIZE, 0)]);
       this.user = user;
       if (this.screen !== 'profile') return;
       const level = levelFromXp(user.xp);
@@ -641,19 +1412,19 @@ export class App {
       const winRate = stats.matches ? ((stats.wins / stats.matches) * 100).toFixed(1) : '0';
       const stat = (v: string | number, l: string) => `<div class="stat"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`;
       this.render('profile', `
-        <div class="screen"><div class="container">${this.header()}
+        <div class="screen fit"><div class="container">${this.header('profile')}
           <div class="grid cols-2">
             <div class="card">
               <h2>👤 Thông tin nhân vật</h2>
               <div class="row"><span class="avatar lg">${esc(user.avatar)}</span>
-                <div><h3 style="margin:0">${esc(user.username)}</h3>
+                <div><h3 style="margin:0">${nameHtml(user.username, user.role === 'admin')}</h3>
                   <div class="muted">Cấp ${level} · ${user.xp} XP tổng</div>
                   <div class="xpbar" style="width:200px;margin-top:6px"><div style="width:${((user.xp - from) / (to - from)) * 100}%"></div></div>
                   <div class="muted" style="font-size:12px">Còn ${to - user.xp} XP để lên cấp ${level + 1}</div>
                   <div class="muted" style="font-size:12px">Tham gia: ${formatDate(user.createdAt)}</div></div></div>
               <div class="spacer"></div>
               <label class="muted">Đổi ảnh đại diện</label>
-              <div class="avatar-picker">${AVATARS.map((a) => `<button data-avatar="${a}" class="${a === user.avatar ? 'active' : ''}">${a}</button>`).join('')}</div>
+              ${avatarPicker(user.avatar)}
               <p class="muted" style="font-size:12px">Cấp độ chỉ để thể hiện, không ảnh hưởng tới sức mạnh trong trận.</p>
             </div>
             <div class="card">
@@ -664,23 +1435,36 @@ export class App {
                 ${stat(`${winRate}%`, 'Tỉ lệ thắng')}
                 ${stat(stats.kills, 'Người đã hạ')}
                 ${stat((stats.kills / losses).toFixed(2), 'K/D')}
-                ${stat(stats.damage, 'Sát thương gây ra')}
+                ${stat(stats.bestDamage, 'Sát thương cao nhất')}
                 ${stat(stats.avgPlacement ? `#${stats.avgPlacement.toFixed(1)}` : '—', 'Thứ hạng TB')}
                 ${stat(stats.avgSurvivalMs ? formatDuration(stats.avgSurvivalMs) : '—', 'Thời gian sống TB')}
-                ${stat(formatDuration(stats.totalSurvivalMs), 'Tổng thời gian sống')}
                 ${stat(stats.bestKills, 'Hạ nhiều nhất / trận')}
               </div>
             </div>
           </div>
+          <div class="spacer"></div>
+          <div class="card fill-card" id="history-card" style="--list-min:240px"></div>
         </div></div>`);
       this.bindNav();
+      this.renderHistory(history, 0);
+      // swaps the avatar in place right away; the server answer only confirms it or rolls it back
+      const showAvatar = (a: string) => {
+        this.ui.querySelectorAll<HTMLElement>('[data-avatar]').forEach((x) => x.classList.toggle('active', x.dataset.avatar === a));
+        this.ui.querySelectorAll('.avatar.lg, .player-chip .avatar').forEach((el) => (el.textContent = a));
+      };
+      let pending = 0;
       this.ui.querySelectorAll<HTMLElement>('[data-avatar]').forEach((b) =>
         b.addEventListener('click', async () => {
+          if (b.classList.contains('active')) return;
+          const seq = ++pending;
+          showAvatar(b.dataset.avatar!);
           try {
             const res = await api.setAvatar(b.dataset.avatar!);
+            if (seq !== pending) return;
             this.user = res.user;
-            this.showProfile();
+            this.social.setMe(res.user);
           } catch (err) {
+            if (seq === pending && this.screen === 'profile') showAvatar(this.user!.avatar);
             toast((err as Error).message, 'error');
           }
         }),
@@ -690,49 +1474,51 @@ export class App {
     }
   }
 
-  private async showHistory(page: number) {
-    const limit = 15;
-    this.render('history', `<div class="screen"><div class="container">${this.header()}<div class="card"><div class="spinner"></div></div></div></div>`);
-    this.bindNav();
-    try {
-      const { items, total } = await api.history(limit, page * limit);
-      if (this.screen !== 'history') return;
-      const rows = items
-        .map((m) => `<tr>
-          <td>${esc(formatDate(m.endedAt))}</td>
-          <td>${esc(MODE_NAMES[m.mode])}</td>
-          <td>${m.placement === 1 ? '🏆 ' : ''}#${m.placement}/${m.playerCount}</td>
-          <td>${m.kills}</td><td>${m.damage}</td>
-          <td>${formatDuration(m.survivalMs)}</td><td>+${m.xpGained}</td></tr>`)
-        .join('');
-      const pages = Math.max(1, Math.ceil(total / limit));
-      this.render('history', `
-        <div class="screen"><div class="container">${this.header()}
-          <div class="card">
-            <h2>📜 Lịch sử trận đấu (${total} trận)</h2>
-            ${items.length ? `<div class="table-wrap"><table class="list">
-              <thead><tr><th>Thời gian</th><th>Chế độ</th><th>Hạng</th><th>Hạ gục</th><th>Sát thương</th><th>Sống sót</th><th>XP</th></tr></thead>
-              <tbody>${rows}</tbody></table></div>` : '<p class="muted">Bạn chưa chơi trận nào.</p>'}
-            <div class="spacer"></div>
-            <div class="row between">
-              <button class="btn small" id="prev" ${page <= 0 ? 'disabled' : ''}>← Trước</button>
-              <span class="muted">Trang ${page + 1}/${pages}</span>
-              <button class="btn small" id="next" ${page + 1 >= pages ? 'disabled' : ''}>Sau →</button>
-            </div>
-          </div>
-        </div></div>`);
-      this.bindNav();
-      $('#prev').addEventListener('click', () => this.showHistory(page - 1));
-      $('#next').addEventListener('click', () => this.showHistory(page + 1));
-    } catch (err) {
-      if (this.screen === 'history') this.loadFailed('Không tải được lịch sử trận đấu', err, () => this.showHistory(page));
-    }
+  /** Fills the match history card on the profile screen; paging swaps only this card. */
+  private renderHistory({ items, total }: { items: MatchHistoryEntry[]; total: number }, page: number) {
+    const card = this.ui.querySelector<HTMLElement>('#history-card');
+    if (!card) return;
+    const rows = items
+      .map((m) => `<tr>
+        <td>${esc(formatDate(m.endedAt))}</td>
+        <td>${esc(MODE_NAMES[m.mode])}${m.teamSize > 1 && isTeamSize(m.teamSize) ? ` · ${TEAM_SIZE_NAMES[m.teamSize]}` : ''}</td>
+        <td>${m.mapId ? `${MAP_DEFS[m.mapId].icon} ${esc(MAP_DEFS[m.mapId].name)}` : '<span class="muted">—</span>'}</td>
+        <td>${m.placement === 1 ? '🏆 ' : ''}${m.teamSize > 1 ? `Đội #${m.placement}` : `#${m.placement}/${m.playerCount}`}</td>
+        <td>${m.kills}</td><td>${m.damage}</td>
+        <td>${formatDuration(m.survivalMs)}</td><td>+${m.xpGained}</td></tr>`)
+      .join('');
+    const pages = Math.max(1, Math.ceil(total / HISTORY_PAGE_SIZE));
+    card.innerHTML = `
+      <h2>📜 Lịch sử trận đấu (${total} trận gần nhất)</h2>
+      <p class="muted">Chỉ lưu ${MATCH_HISTORY_KEEP} trận gần nhất, thống kê phía trên vẫn tính mọi trận đã chơi.</p>
+      ${items.length ? `<div class="card-scroll ui-scroll"><table class="list nowrap">
+        <thead><tr><th>Thời gian</th><th>Chế độ</th><th>Bản đồ</th><th>Hạng</th><th>Hạ gục</th><th>Sát thương</th><th>Sống sót</th><th>XP</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>` : '<p class="muted">Bạn chưa chơi trận nào.</p>'}
+      ${pages > 1 ? `<div class="spacer"></div>
+      <div class="row between">
+        <button class="btn small" data-page="${page - 1}" ${page <= 0 ? 'disabled' : ''}>← Trước</button>
+        <span class="muted">Trang ${page + 1}/${pages}</span>
+        <button class="btn small" data-page="${page + 1}" ${page + 1 >= pages ? 'disabled' : ''}>Sau →</button>
+      </div>` : ''}`;
+    card.querySelectorAll<HTMLButtonElement>('[data-page]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        const next = Number(b.dataset.page);
+        card.querySelectorAll<HTMLButtonElement>('[data-page]').forEach((x) => (x.disabled = true));
+        try {
+          const res = await api.history(HISTORY_PAGE_SIZE, next * HISTORY_PAGE_SIZE);
+          if (this.screen === 'profile') this.renderHistory(res, next);
+        } catch (err) {
+          toast(`Không tải được lịch sử trận đấu: ${(err as Error).message}`, 'error');
+          if (this.screen === 'profile') this.renderHistory({ items, total }, page);
+        }
+      }),
+    );
   }
 
-  private showPanel(title: string, body: string, bind?: (root: HTMLElement) => void) {
+  private showPanel(nav: PanelNav, title: string, body: string, bind?: (root: HTMLElement) => void) {
     this.render('panel', `
-      <div class="screen"><div class="container">${this.header()}
-        <div class="card"><h2>${title}</h2>${body}</div>
+      <div class="screen fit"><div class="container">${this.header(nav)}
+        <div class="card fill-card hug"><h2>${title}</h2><div class="card-scroll ui-scroll">${body}</div></div>
       </div></div>`);
     this.bindNav();
     bind?.(this.ui);

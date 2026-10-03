@@ -37,8 +37,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
-  register: (username: string, password: string, avatar: string) =>
-    request<{ token: string; user: PublicUser }>('POST', '/auth/register', { username, password, avatar }),
+  register: (username: string, password: string, avatar: string, fillMs: number, website: string) =>
+    request<{ token: string; user: PublicUser }>('POST', '/auth/register', { username, password, avatar, fillMs, website }),
   login: (username: string, password: string) =>
     request<{ token: string; user: PublicUser }>('POST', '/auth/login', { username, password }),
   me: () => request<{ user: PublicUser; inMatch: boolean }>('GET', '/me'),
@@ -46,5 +46,5 @@ export const api = {
   stats: () => request<{ stats: UserStats }>('GET', '/me/stats'),
   history: (limit: number, offset: number) =>
     request<{ items: MatchHistoryEntry[]; total: number }>('GET', `/me/history?limit=${limit}&offset=${offset}`),
-  room: (id: string) => request<{ id: string; hostName: string; count: number; max: number }>('GET', `/rooms/${id}`),
+  room: (id: string) => request<{ id: string; name: string; hostName: string; count: number; max: number }>('GET', `/rooms/${id}`),
 };

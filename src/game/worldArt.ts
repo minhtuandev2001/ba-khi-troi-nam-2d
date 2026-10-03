@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { BASE_VIEW_DIAGONAL } from '../shared';
 
 /**
  * World art in the spirit of Văn Lang / Âu Lạc: thatched stilt houses, bamboo and areca groves,
@@ -28,7 +29,21 @@ export const TEX = {
   drum: 'w_drum',
   lacBird: 'w_lacbird',
   plume: 'w_plume',
+  boar: 'w_boar',
+  heldBlowpipe: 'w_held_blowpipe',
+  heldBow: 'w_held_bow',
+  heldCrossbow: 'w_held_crossbow',
+  heldDivineBow: 'w_held_divinebow',
+  fireJar: 'w_firejar',
+  gourd: 'w_gourd',
 } as const;
+
+/**
+ * Held weapons are drawn into HELD_W × HELD_H textures in the player's frame: x runs forward from the player's
+ * centre and y = 0 sits at the texture's mid-height, so the image goes at the origin with origin (0, 0.5).
+ */
+export const HELD_W = 64;
+export const HELD_H = 72;
 
 /** Radius the round props are drawn at inside their 128px texture (the rest is shadow). */
 export const PROP_RADIUS = 54;
@@ -36,8 +51,31 @@ export const PROP_RADIUS = 54;
 export const TRUNK_RADIUS = 28;
 /** Chest body size inside its 64px texture. */
 export const CHEST_BODY = 52;
+/** Body width of the boar (across its back) inside its 96px texture; it faces +x. */
+export const BOAR_BODY = 36;
 
 const INK = 0x2a1a0e;
+
+/** Rocks and trunks are shown up to ~1.2x their logical texture size, the largest of any prop. */
+const MAX_PROP_SCALE = 1.25;
+const MAX_RESOLUTION = 4;
+const logicalWidth = new Map<string, number>();
+
+/**
+ * Screen pixels per world unit at the closest the camera gets (1x scope, full screen). Textures and
+ * text are rasterised this dense, otherwise the camera zoom magnifies them into a blur.
+ */
+export function worldResolution(scene: Phaser.Scene): number {
+  const dpr = scene.scale.width / window.innerWidth;
+  const w = Math.max(window.screen.width, window.innerWidth);
+  const h = Math.max(window.screen.height, window.innerHeight);
+  return Phaser.Math.Clamp((Math.hypot(w, h) * dpr) / BASE_VIEW_DIAGONAL, 1, MAX_RESOLUTION);
+}
+
+/** Tile scale that makes a baked texture repeat every `worldTile` world units (its logical width by default). */
+export function tileScale(scene: Phaser.Scene, key: string, worldTile = logicalWidth.get(key) ?? 1): number {
+  return worldTile / scene.textures.getFrame(key).width;
+}
 
 function rng(seed: number) {
   let s = seed;
@@ -74,6 +112,40 @@ function star(g: G, cx: number, cy: number, points: number, outer: number, inner
   g.fillPoints(pts, true);
 }
 
+function quad(x0: number, y0: number, cx: number, cy: number, x1: number, y1: number, n = 18): P[] {
+  const pts: P[] = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    const u = 1 - t;
+    pts.push(vec(u * u * x0 + 2 * u * t * cx + t * t * x1, u * u * y0 + 2 * u * t * cy + t * t * y1));
+  }
+  return pts;
+}
+
+/** Open polyline with an ink outline underneath. */
+function inked(g: G, pts: P[], width: number, color: number) {
+  g.lineStyle(width + 2.5, INK, 1);
+  g.strokePoints(pts, false);
+  g.lineStyle(width, color, 1);
+  g.strokePoints(pts, false);
+}
+
+/** Arrow along +x from its nock at `x0` to its tip at `x1`, centred on y = `y`. */
+function heldArrow(g: G, x0: number, x1: number, y: number, shaft: number, head: number, fletch: number, claw = false) {
+  inked(g, [vec(x0 + 2, y), vec(x1 - 5, y)], 2, shaft);
+  g.fillStyle(fletch, 1);
+  g.lineStyle(1.5, INK, 1);
+  const f = [vec(x0, y - 3.5), vec(x0 + 6, y - 1), vec(x0 + 6, y + 1), vec(x0, y + 3.5)];
+  g.fillPoints(f, true);
+  g.strokePoints(f, true);
+  g.fillStyle(head, 1);
+  const h = claw
+    ? [vec(x1 - 7, y - 3.5), vec(x1 - 1, y - 3.5), vec(x1 + 1, y + 1), vec(x1 - 2, y + 0.5), vec(x1 - 7, y + 3.5)]
+    : [vec(x1 - 7, y - 3.5), vec(x1, y), vec(x1 - 7, y + 3.5)];
+  g.fillPoints(h, true);
+  g.strokePoints(h, true);
+}
+
 function blob(g: G, cx: number, cy: number, radius: number, wobble: number, seed: number, color: number, alpha = 1): P[] {
   const r = rng(seed);
   const pts: P[] = [];
@@ -88,13 +160,27 @@ function blob(g: G, cx: number, cy: number, radius: number, wobble: number, seed
   return pts;
 }
 
+/**
+ * Textures repeated by TileSprites. The TileSprite shader wraps UVs itself, and that jump at every tile edge
+ * makes the GPU pick the smallest mip there, drawing a grid of lines, so these are never mipmapped.
+ */
+const TILED = new Set<string>([TEX.grass, TEX.stakes, TEX.thatch, TEX.slats]);
+
 export function makeWorldTextures(scene: Phaser.Scene) {
+  const tileRes = worldResolution(scene);
+  const propRes = tileRes * MAX_PROP_SCALE;
+  // drawing code works in logical units; props are scaled up to a power of two so WebGL can mipmap them for wide scopes
   const make = (key: string, w: number, h: number, draw: (g: G) => void) => {
+    logicalWidth.set(key, w);
     if (scene.textures.exists(key)) return;
-    const g = scene.add.graphics();
+    const tiled = TILED.has(key);
+    const side = Math.max(w, h);
+    const k = tiled ? Math.ceil(side * tileRes) / side : Phaser.Math.Pow2.GetPowerOfTwo(Math.ceil(side * propRes)) / side;
+    const g = scene.add.graphics().setScale(k);
     draw(g);
-    g.generateTexture(key, w, h);
+    g.generateTexture(key, Math.round(w * k), Math.round(h * k));
     g.destroy();
+    if (tiled) scene.textures.get(key).setFilter(Phaser.Textures.FilterMode.LINEAR);
   };
 
   // meadow grass; blobs are drawn wrapped so the tile has no seams
@@ -391,49 +477,97 @@ export function makeWorldTextures(scene: Phaser.Scene) {
     star(g, 32, 32, 10, 9, 4, 0xf6dc8a);
   });
 
-  // trống đồng: the bronze drum face with its central sun, rings and frogs on the rim
+  // trống đồng Đông Sơn seen from above, the way the Ngọc Lũ drum is drawn: a copper rim with four frogs,
+  // a verdigris face engraved in gold with the sun, a band of Lạc birds flying anticlockwise and rings of
+  // circle-dots and ladders. The green face and gold lines stand out on the yellow-brown ground.
   make(TEX.drum, 128, 128, (g) => {
     const c = 64;
-    g.fillStyle(INK, 0.25);
-    g.fillCircle(c + 4, c + 6, 60);
-    g.fillStyle(0xb48543, 1);
-    g.fillCircle(c, c, 60);
-    g.fillStyle(0x5f9a7a, 0.3);
-    g.fillCircle(c + 26, c - 30, 16);
-    g.fillCircle(c - 34, c + 20, 12);
-    g.lineStyle(2, 0x6e4e22, 1);
-    for (const r of [53, 45, 35, 23]) g.strokeCircle(c, c, r);
+    const gold = 0xf7cf5e;
+    // local (forward = +x) point turned to heading `h` and placed at (x, y)
+    const at = (x: number, y: number, h: number) => (lx: number, ly: number) =>
+      vec(x + lx * Math.cos(h) - ly * Math.sin(h), y + lx * Math.sin(h) + ly * Math.cos(h));
+
+    g.fillStyle(INK, 0.3);
+    g.fillCircle(c + 3, c + 4, 60);
+    g.fillStyle(0xa4532a, 1);
+    g.fillCircle(c, c, 61);
+    g.lineStyle(3, 0xd98a52, 1);
+    g.beginPath();
+    g.arc(c, c, 57.5, Math.PI * 1.05, Math.PI * 1.7);
+    g.strokePath();
+
+    g.fillStyle(0x2c7a68, 1);
+    g.fillCircle(c, c, 52);
+    g.fillStyle(0x4fae94, 0.45);
+    g.fillCircle(c + 20, c - 26, 12);
+    g.fillCircle(c - 30, c + 14, 9);
+    g.fillCircle(c + 8, c + 32, 7);
+
+    g.lineStyle(2, gold, 1);
+    for (const r of [49.5, 44, 40, 37, 25, 21]) g.strokeCircle(c, c, r);
+    // circle-dot band
+    for (let i = 0; i < 22; i++) {
+      const a = (i / 22) * Math.PI * 2;
+      const x = c + Math.cos(a) * 46.8;
+      const y = c + Math.sin(a) * 46.8;
+      g.lineStyle(1.2, gold, 1);
+      g.strokeCircle(x, y, 1.9);
+      g.fillStyle(gold, 1);
+      g.fillCircle(x, y, 0.8);
+    }
+    // ladder band
+    g.lineStyle(1.4, gold, 1);
     for (let i = 0; i < 48; i++) {
       const a = (i / 48) * Math.PI * 2;
-      g.lineBetween(c + Math.cos(a) * 46, c + Math.sin(a) * 46, c + Math.cos(a) * 52, c + Math.sin(a) * 52);
+      g.lineBetween(c + Math.cos(a) * 40, c + Math.sin(a) * 40, c + Math.cos(a) * 37, c + Math.sin(a) * 37);
     }
-    for (let i = 0; i < 16; i++) {
-      const a = (i / 16) * Math.PI * 2;
-      const x = c + Math.cos(a) * 40;
-      const y = c + Math.sin(a) * 40;
-      g.strokeCircle(x, y, 3.2);
-      g.fillStyle(0x6e4e22, 1);
-      g.fillCircle(x, y, 1.2);
+    // Lạc birds: long beak, crest, spread wings and a forked tail, flying round the sun
+    const bird = [
+      [11, 0], [5, -1.3], [3, -3.2], [2, -1.6], [0, -1.8], [-2, -7.5], [-5, -7], [-3.5, -1.6], [-7, -1.2],
+      [-11, -3.4], [-9.5, 0], [-11, 3.4], [-7, 1.2], [-3.5, 1.6], [-5, 7], [-2, 7.5], [0, 1.8], [5, 1.3],
+    ];
+    g.fillStyle(gold, 1);
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      const p = at(c + Math.cos(a) * 31, c + Math.sin(a) * 31, a - Math.PI / 2);
+      g.fillPoints(bird.map(([x, y]) => p(x, y)), true);
     }
-    // flying Lạc birds reduced to chevrons circling the sun
-    for (let i = 0; i < 8; i++) {
-      const a = (i / 8) * Math.PI * 2;
-      const x = c + Math.cos(a) * 29;
-      const y = c + Math.sin(a) * 29;
-      const t = a + Math.PI / 2;
-      g.lineBetween(x - Math.cos(t) * 5 - Math.cos(a) * 3, y - Math.sin(t) * 5 - Math.sin(a) * 3, x, y);
-      g.lineBetween(x, y, x + Math.cos(t) * 5 - Math.cos(a) * 3, y + Math.sin(t) * 5 - Math.sin(a) * 3);
+    // zigzag band
+    const zig: P[] = [];
+    for (let i = 0; i <= 56; i++) {
+      const a = (i / 56) * Math.PI * 2;
+      const r = i % 2 ? 21.5 : 24.5;
+      zig.push(vec(c + Math.cos(a) * r, c + Math.sin(a) * r));
     }
-    star(g, c, c, 14, 20, 8, 0xf0cf7a);
-    g.fillStyle(0xb48543, 1);
-    g.fillCircle(c, c, 5);
+    g.lineStyle(1.2, gold, 1);
+    g.strokePoints(zig, false);
+    star(g, c, c, 14, 19, 7, gold);
+    g.fillStyle(0xfff1b8, 1);
+    g.fillCircle(c, c, 4);
+
+    // four frogs squatting on the rim, all facing the same way round
     for (let i = 0; i < 4; i++) {
       const a = Math.PI / 4 + (i * Math.PI) / 2;
-      g.fillStyle(0x7e5a26, 1);
-      g.fillEllipse(c + Math.cos(a) * 56, c + Math.sin(a) * 56, 9, 9);
+      const p = at(c + Math.cos(a) * 56.5, c + Math.sin(a) * 56.5, a - Math.PI / 2);
+      g.lineStyle(2, INK, 1);
+      for (const [x0, y0, x1, y1] of [[1, -2, 3.5, -5], [1, 2, 3.5, 5], [-2, -2.5, -5.5, -4.5], [-2, 2.5, -5.5, 4.5]]) {
+        const s = p(x0, y0);
+        const e = p(x1, y1);
+        g.lineBetween(s.x, s.y, e.x, e.y);
+      }
+      const body = p(-0.5, 0);
+      const head = p(3.6, 0);
+      g.fillStyle(0xe9b04e, 1);
+      g.fillCircle(body.x, body.y, 3.8);
+      g.fillCircle(head.x, head.y, 2.6);
+      g.lineStyle(1.4, INK, 1);
+      g.strokeCircle(body.x, body.y, 3.8);
     }
-    g.lineStyle(4, 0x4e3414, 1);
-    g.strokeCircle(c, c, 60);
+
+    g.lineStyle(2.5, INK, 1);
+    g.strokeCircle(c, c, 52);
+    g.lineStyle(3.5, INK, 1);
+    g.strokeCircle(c, c, 61);
   });
 
   // chim Lạc carrying the drum down: long beak forward, wings spread
@@ -495,5 +629,133 @@ export function makeWorldTextures(scene: Phaser.Scene) {
       g.lineStyle(1.2, 0xb08a5a, 1);
       g.lineBetween(60, 32, 60 + Math.cos(a) * len * 0.62, 32 + Math.sin(a) * len * 0.62);
     }
+  });
+
+  // lợn rừng seen from above, snout towards +x
+  make(TEX.boar, 96, 96, (g) => {
+    const c = 48;
+    g.fillStyle(INK, 0.22);
+    g.fillEllipse(c + 2, c + 5, 74, 44);
+    g.fillStyle(0x2e1c10, 1);
+    for (const [x, y] of [[26, 31], [26, 65], [54, 30], [54, 66]]) g.fillEllipse(x, y, 11, 8);
+    g.lineStyle(2.5, 0x2e1c10, 1);
+    g.lineBetween(16, c, 9, c + 3);
+    g.fillStyle(0x6b4a2e, 1);
+    g.fillEllipse(c - 8, c, 50, BOAR_BODY);
+    g.lineStyle(2.5, INK, 1);
+    g.strokeEllipse(c - 8, c, 50, BOAR_BODY);
+    // bristly ridge along the spine
+    g.lineStyle(2, 0x2e1c10, 1);
+    for (let x = 22; x <= 58; x += 4) g.lineBetween(x, c - 3 + (x % 8 ? 1 : 0), x - 3, c + 3);
+    g.fillStyle(0x7d5636, 0.7);
+    g.fillEllipse(c - 10, c - 9, 30, 8);
+    // ears, head, snout and tusks
+    g.fillStyle(0x4a3020, 1);
+    g.fillTriangle(58, 37, 66, 30, 68, 41);
+    g.fillTriangle(58, 59, 66, 66, 68, 55);
+    g.fillStyle(0x5a3c24, 1);
+    g.fillEllipse(68, c, 24, 24);
+    g.lineStyle(2.5, INK, 1);
+    g.strokeEllipse(68, c, 24, 24);
+    g.fillStyle(0xf2ead6, 1);
+    g.fillTriangle(76, 40, 84, 37, 79, 43);
+    g.fillTriangle(76, 56, 84, 59, 79, 53);
+    g.fillStyle(0xc8907a, 1);
+    g.fillEllipse(81, c, 9, 12);
+    g.lineStyle(2, INK, 1);
+    g.strokeEllipse(81, c, 9, 12);
+    g.fillStyle(INK, 1);
+    g.fillCircle(82, c - 2.5, 1.4);
+    g.fillCircle(82, c + 2.5, 1.4);
+    g.fillCircle(70, c - 7, 1.8);
+    g.fillCircle(70, c + 7, 1.8);
+  });
+
+  // held weapons, seen from above and pointing along +x; each one's tip sits at GUN_OFFSET + GUN_LENGTH
+  const m = HELD_H / 2;
+  make(TEX.heldBlowpipe, HELD_W, HELD_H, (g) => {
+    g.fillStyle(0xdcc47c, 1);
+    g.fillRoundedRect(12, m - 3.5, 36, 7, 3.5);
+    g.lineStyle(2.5, INK, 1);
+    g.strokeRoundedRect(12, m - 3.5, 36, 7, 3.5);
+    g.lineStyle(1.5, 0x9c8440, 1);
+    for (const x of [25, 37]) g.lineBetween(x, m - 2.5, x, m + 2.5);
+    g.fillStyle(0xd24a3a, 1);
+    g.fillRect(13.5, m - 2.2, 4.5, 4.4);
+    g.fillStyle(0xffffff, 0.45);
+    g.fillRect(19, m - 2, 26, 1.2);
+  });
+  make(TEX.heldBow, HELD_W, HELD_H, (g) => {
+    g.lineStyle(1.2, 0xf6ead0, 1);
+    g.strokePoints([vec(26, m - 23), vec(14, m), vec(26, m + 23)], false);
+    heldArrow(g, 12, 44, m, 0xe0bd84, 0xc8963e, 0xf2e6cc);
+    inked(g, quad(26, m - 23, 46, m, 26, m + 23), 3.5, 0xa8692f);
+    g.fillStyle(0xd24a3a, 1);
+    g.fillRect(33.5, m - 3, 4, 6);
+  });
+  make(TEX.heldCrossbow, HELD_W, HELD_H, (g) => {
+    g.lineStyle(1.2, 0xf6ead0, 1);
+    g.strokePoints([vec(42, m - 21), vec(28, m), vec(42, m + 21)], false);
+    g.fillStyle(0xb8793a, 1);
+    g.fillRoundedRect(10, m - 3.5, 38, 7, 2.5);
+    g.lineStyle(2.5, INK, 1);
+    g.strokeRoundedRect(10, m - 3.5, 38, 7, 2.5);
+    for (const da of [-0.16, 0, 0.16]) {
+      const len = 24;
+      const x0 = 28;
+      inked(g, [vec(x0, m), vec(x0 + Math.cos(da) * len, m + Math.sin(da) * len)], 1.6, 0x8a5a2b);
+      const tx = x0 + Math.cos(da) * len;
+      const ty = m + Math.sin(da) * len;
+      g.fillStyle(0xd4a02a, 1);
+      g.fillCircle(tx, ty, 2.2);
+    }
+    inked(g, quad(42, m - 21, 54, m, 42, m + 21), 4, 0x5c3417);
+    g.fillStyle(0xd4a02a, 1);
+    g.fillRect(19, m - 2, 5, 4);
+  });
+  make(TEX.heldDivineBow, HELD_W, HELD_H, (g) => {
+    g.lineStyle(1.4, 0xff5a4a, 1);
+    g.strokePoints([vec(30, m - 30), vec(16, m), vec(30, m + 30)], false);
+    heldArrow(g, 14, 52, m, 0xffd34a, 0xffc21a, 0xff5a4a, true);
+    inked(g, [vec(34, m - 33), ...quad(30, m - 30, 58, m, 30, m + 30), vec(34, m + 33)], 4.5, 0xffc21a);
+    g.lineStyle(1.2, 0xfff3b0, 1);
+    g.strokePoints(quad(33, m - 24, 55, m, 33, m + 24), false);
+    g.fillStyle(0x8a2a1a, 1);
+    g.fillRect(41.5, m - 3.5, 4.5, 7);
+    g.fillStyle(0xe8553e, 1);
+    g.fillCircle(34, m - 33, 2.6);
+    g.fillCircle(34, m + 33, 2.6);
+  });
+
+  // hũ lửa in flight: a clay jar seen from above, its wick burning in the mouth
+  make(TEX.fireJar, 32, 32, (g) => {
+    g.fillStyle(0xc4692f, 1);
+    g.fillCircle(16, 16, 11);
+    g.lineStyle(2.5, INK, 1);
+    g.strokeCircle(16, 16, 11);
+    g.lineStyle(1.5, 0x7a3a14, 1);
+    g.strokeCircle(16, 16, 7.5);
+    g.fillStyle(0xe8d3a0, 1);
+    g.fillCircle(16, 16, 4.5);
+    g.fillStyle(0xff9a1f, 1);
+    g.fillCircle(16, 16, 3);
+    g.fillStyle(0xffe066, 1);
+    g.fillCircle(16, 16, 1.6);
+  });
+  // bầu khói in flight: a dried gourd with its stopper
+  make(TEX.gourd, 32, 32, (g) => {
+    g.fillStyle(0xd9c27a, 1);
+    g.fillCircle(13, 18, 9);
+    g.fillCircle(21, 11, 6);
+    g.lineStyle(2.5, INK, 1);
+    g.strokeCircle(13, 18, 9);
+    g.strokeCircle(21, 11, 6);
+    g.fillStyle(0xd9c27a, 1);
+    g.fillCircle(13, 18, 7.8);
+    g.fillCircle(21, 11, 4.8);
+    g.fillStyle(0xd24a3a, 1);
+    g.fillCircle(17.2, 14.5, 2);
+    g.fillStyle(0x7a4a22, 1);
+    g.fillCircle(24, 8, 2.4);
   });
 }
