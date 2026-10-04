@@ -145,6 +145,7 @@ export class GameSession {
       spectate: (target) => this.socket.emit('spectate', target),
       leave: () => this.leave(),
       mark: (at) => this.mark(at),
+      ...(useTouchControls() ? { editControls: () => this.touch?.startEdit() } : {}),
       ...(this.observer ? {
         observe: {
           step: (dir: 1 | -1) => this.observeStep(dir),
@@ -154,7 +155,7 @@ export class GameSession {
     });
 
     this.touch = useTouchControls()
-      ? new TouchControls(document.getElementById('touch')!, (b) => this.onTouchButton(b), start.mapId === TRAINING_MAP)
+      ? new TouchControls(document.getElementById('touch')!, (b) => this.onTouchButton(b), { training: start.mapId === TRAINING_MAP })
       : null;
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2);

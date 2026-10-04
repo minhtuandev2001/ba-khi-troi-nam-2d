@@ -116,7 +116,7 @@ button, input, select { font: inherit; color: inherit; }
 .confirm-modal .choice-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
 .confirm-modal .choice-list > .btn.danger:last-child:nth-child(odd) { grid-column: 1 / -1; }
 .create-room { position: fixed; z-index: 45; animation: fade-in 0.15s ease-out; }
-/* above everything, toasts included: nothing behind it may be used until the page is reloaded */
+/* notice after a blocked right click or F12; above everything, toasts included, until dismissed */
 .devtools-lock {
   position: fixed;
   inset: 0;
@@ -818,8 +818,17 @@ span.mode-cta { pointer-events: none; }
     width: var(--room-dock);
     min-height: 0;
     margin: 0;
+    /* its own layer, so scrolling the page under it never repaints the list */
+    transform: translateZ(0);
   }
-  .room-browser-card { padding: 16px; }
+  /* fixed inside the scrolling .screen, a backdrop blur is recomputed on every scroll and hover frame and
+     flickers in Chromium (Cursor's browser included); the dock sits over a still background, so a solid fill looks the same */
+  .room-browser-card {
+    padding: 16px;
+    background: rgba(72, 34, 14, 0.93);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
   /* how far the dock reaches past the left edge of the centred container (max-width 1240px, 16px screen padding) */
   .lobby-main {
     container-type: inline-size;
@@ -1669,6 +1678,8 @@ body.net-pending .mode-card, body.net-pending #start-room { cursor: progress; }
   font-size: 22px;
   pointer-events: auto;
   touch-action: none;
+  /* --s is the player's own size for this button, from the button editor */
+  transform: scale(var(--s, 1));
 }
 .tbtn small { font-size: 12px; font-weight: 800; }
 .tbtn:active, .tbtn.on {
@@ -1695,6 +1706,101 @@ body.touch-ui {
 .t-scope { top: calc(56px + var(--tb-step)); }
 .t-map { top: calc(56px + 2 * var(--tb-step)); }
 .t-inventory { top: calc(56px + 3 * var(--tb-step)); }
+
+/* button editor: above the HUD (the match keeps running behind a dim veil), every button shown and draggable */
+#touch[data-mode='edit'] { z-index: 64; pointer-events: auto; touch-action: none; background: rgba(20, 8, 2, 0.5); }
+#touch[data-mode='edit'] .joy-zone { display: none; }
+#touch[data-mode='edit'] .tbtn { opacity: 1 !important; outline: 2px dashed rgba(255, 244, 220, 0.75); outline-offset: 3px; cursor: grab; }
+#touch[data-mode='edit'] .tbtn.sel { outline: 3px solid var(--gold); background: rgba(120, 60, 18, 0.9); }
+.tedit-bar {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(340px, calc(100vw - 24px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-soft);
+  background: rgba(60, 28, 10, 0.94);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  color: #fff4dc;
+  pointer-events: auto;
+}
+.tedit-head { display: flex; flex-direction: column; align-items: center; gap: 2px; padding-bottom: 2px; cursor: move; touch-action: none; text-align: center; }
+.tedit-head b { font-size: 16px; font-weight: 800; }
+.tedit-head b::before { content: '⠿ '; opacity: 0.6; }
+.tedit-sel { font-size: 12px; font-weight: 600; opacity: 0.85; }
+.tedit-size { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; }
+.tedit-size input { flex: 1; min-width: 0; accent-color: var(--gold); }
+.tedit-size input:disabled { opacity: 0.4; }
+.tedit-size b { min-width: 42px; text-align: right; }
+.tedit-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.tedit-actions .btn { padding: 6px 4px; }
+
+/* button editor page (menu → Chỉnh nút): a sketch of the match screen under the buttons, sized like the real HUD,
+   so the player sees what a button would cover */
+#touch.preview[data-mode='edit'] { background: rgba(20, 8, 2, 0.12); }
+.ctl-page {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 22% 30%, #6f8f3a 0 34px, transparent 36px),
+    radial-gradient(circle at 70% 22%, #6f8f3a 0 46px, transparent 48px),
+    radial-gradient(circle at 82% 70%, #a59a86 0 26px, transparent 28px),
+    radial-gradient(circle at 36% 78%, #a59a86 0 20px, transparent 22px),
+    linear-gradient(160deg, #a3b65c, #8ea24c);
+}
+.ctl-page span { font-size: 12px; font-weight: 800; color: rgba(255, 248, 225, 0.92); text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55); }
+.ctl-zone { position: absolute; bottom: 0; width: 50%; height: 60%; display: flex; align-items: flex-start; justify-content: center; padding-top: 10px; border: 2px dashed rgba(255, 248, 225, 0.35); border-bottom: 0; }
+.ctl-zone.left { left: 0; border-left: 0; }
+.ctl-zone.right { right: 0; border-right: 0; background: rgba(255, 90, 90, 0.06); }
+.ctl-map {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  right: 10px;
+  width: 170px;
+  height: 170px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid rgba(255, 255, 255, 0.6);
+  border-radius: var(--radius);
+  background: #9aab58;
+  opacity: 0.85;
+}
+.ctl-me { position: absolute; left: 50%; top: 50%; width: 30px; height: 30px; margin: -15px 0 0 -15px; border-radius: 50%; background: #f2c98a; border: 3px solid #5a3212; }
+.ctl-bottom {
+  position: absolute;
+  bottom: max(10px, env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  width: clamp(240px, calc(100vw - 300px), 500px);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  opacity: 0.85;
+}
+.ctl-hp { height: 18px; border-radius: 9px; background: linear-gradient(#e0473a, #a8261c); border: 2px solid rgba(40, 16, 4, 0.6); color: #fff; font-size: 11px; font-weight: 800; line-height: 14px; text-align: center; }
+.ctl-slots { display: flex; gap: 4px; }
+.ctl-slots i { flex: 1; height: 40px; border-radius: var(--radius-sm); background: var(--glass-fill-hud); border: 1.5px solid rgba(255, 255, 255, 0.25); }
+@media (max-width: 600px) {
+  .ctl-map { width: 110px; height: 110px; }
+}
+@media (max-aspect-ratio: 1/1) {
+  .ctl-bottom { bottom: 190px; width: min(94vw, 440px); }
+}
+@media (orientation: landscape) and (max-height: 500px) {
+  .ctl-zone { height: 76%; }
+  .ctl-map { width: 120px; height: 120px; }
+  .ctl-bottom { bottom: max(6px, env(safe-area-inset-bottom)); width: min(44vw, 360px); gap: 3px; }
+  .ctl-hp { height: 16px; line-height: 12px; }
+  .ctl-slots i { height: 30px; }
+}
 
 /* a phone held upright: the match keeps running under a card asking to turn it sideways */
 .rotate-hint { display: none; }
@@ -1752,6 +1858,10 @@ body.touch-ui .tbtn:not(:active):not(.on) {
   background: rgba(60, 30, 12, 0.66);
 }
 
+/* the browser must not claim these touches for a pan or zoom, so a tap here works while the other thumb steers */
+body.touch-ui .slots,
+body.touch-ui .hud-scope,
+body.touch-ui .minimap { touch-action: none; }
 body.touch-ui .hud-inv { display: none; }
 body.touch-ui .hud-scope { --chip: 38px; }
 body.touch-ui .hud-scope .kbd { display: none; }

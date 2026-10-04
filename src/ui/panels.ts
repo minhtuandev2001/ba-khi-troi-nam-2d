@@ -152,7 +152,8 @@ export function itemsPanel(): string {
     <p class="muted">Độ bền giáp giảm đúng bằng lượng sát thương nó chặn được. Khi độ bền về 0, giáp bị vỡ.</p>`;
 }
 
-export function settingsPanel(): string {
+/** `canEditLayout`: offer the button editor (touch screens only, where the caller can open it). */
+export function settingsPanel(canEditLayout = false): string {
   const s = settings;
   return `
     <div class="field"><label>Âm lượng: <b id="vol-label">${Math.round(s.volume * 100)}%</b></label>
@@ -165,10 +166,12 @@ export function settingsPanel(): string {
     <div class="field"><label><input type="checkbox" data-setting="screenShake" ${s.screenShake ? 'checked' : ''}/> Rung màn hình</label></div>
     <div class="field"><label><input type="checkbox" data-setting="showFps" ${s.showFps ? 'checked' : ''}/> Hiện FPS và ping</label></div>
     ${useTouchControls() ? `<div class="field"><label>Kích thước nút cảm ứng: <b id="touch-label">${Math.round(s.touchSize * 100)}%</b></label>
-      <div class="slider-row"><input type="range" min="50" max="140" value="${Math.round(s.touchSize * 100)}" data-setting="touchSize" /></div></div>` : ''}`;
+      <div class="slider-row"><input type="range" min="50" max="140" value="${Math.round(s.touchSize * 100)}" data-setting="touchSize" /></div>
+      ${canEditLayout ? '<button type="button" class="btn small" data-edit-layout>🎛️ Chỉnh vị trí và cỡ từng nút</button><p class="muted">Bố cục được lưu vào tài khoản, lần sau đăng nhập không phải chỉnh lại.</p>' : ''}</div>` : ''}`;
 }
 
-export function bindSettings(root: HTMLElement) {
+export function bindSettings(root: HTMLElement, editLayout?: () => void) {
+  if (editLayout) root.querySelector('[data-edit-layout]')?.addEventListener('click', editLayout);
   root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-setting]').forEach((el) => {
     const key = el.dataset.setting as keyof Settings;
     el.addEventListener('input', () => {

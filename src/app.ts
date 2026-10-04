@@ -49,7 +49,9 @@ import { ApiError, api, getToken, setToken } from './api';
 import { setMenuMusic, unlockAudio } from './game/audio';
 import { MapRenderer } from './game/Minimap';
 import type { GameSession } from './game/session';
+import type { TouchControls } from './game/Touch';
 import { connectSocket, disconnectSocket } from './net';
+import { useTouchControls } from './settings';
 import { setDevtoolsAllowed } from './ui/devtoolsGuard';
 import { $, confirmDialog, esc, formatDate, formatDuration, html, toast } from './ui/dom';
 import { enterFullscreen, leaveFullscreen } from './ui/fullscreen';
@@ -59,10 +61,11 @@ import { walker } from './ui/loader';
 import { adminBadge, nameHtml } from './ui/names';
 import { showStoryDialog } from './ui/story';
 import { MODE_ICONS } from './ui/theme';
+import { syncLayouts } from './ui/touchLayout';
 import { SocialClient } from './social/SocialClient';
 import { SocialPanel } from './social/SocialPanel';
 
-type Screen = 'loading' | 'auth' | 'lobby' | 'queue' | 'room' | 'party' | 'profile' | 'panel' | 'game' | 'message';
+type Screen = 'loading' | 'auth' | 'lobby' | 'queue' | 'room' | 'party' | 'profile' | 'panel' | 'controls' | 'game' | 'message';
 /** Screens on the way into a match, or in one; leaving them for anything else ends fullscreen on phones. */
 const PLAY_SCREENS = new Set<Screen>(['queue', 'room', 'party', 'game']);
 /** Requests sent by the tap that starts a match (or the wait for one); phones go fullscreen right then. */
@@ -71,21 +74,24 @@ const FULLSCREEN_EVENTS = new Set(['queue:join', 'party:queue', 'bot:start', 'tr
 const PENDING_ROOM_KEY = 'br2d_pending_room';
 const PENDING_PARTY_KEY = 'br2d_pending_party';
 const INVITE_SENT_MS = 10_000;
-const SOCIAL_HIDDEN_ON = new Set<Screen>(['loading', 'auth', 'game', 'message']);
+const SOCIAL_HIDDEN_ON = new Set<Screen>(['loading', 'auth', 'controls', 'game', 'message']);
 const HISTORY_PAGE_SIZE = 10;
 /** Shown under the logo on the sign-in screen and in the lobby. */
 const TAGLINE = 'Nghịch cảnh càng lớn, ý chí càng mạnh.';
 
 type PanelNav = 'guide' | 'items' | 'keys' | 'settings';
-type NavKey = 'lobby' | 'profile' | PanelNav;
+type NavKey = 'lobby' | 'profile' | 'controls' | PanelNav;
+type NavButton = [nav: NavKey, icon: string, label: string];
 /** Every menu screen shows the same toolbar (only the highlight moves), so the header never shifts. */
-const NAV_BUTTONS: [nav: NavKey, icon: string, label: string][] = [
+const NAV_BUTTONS: NavButton[] = [
   ['lobby', '🏠', 'Sảnh'],
   ['guide', '📖', 'Hướng dẫn'],
   ['items', '🎒', 'Vật phẩm'],
   ['keys', '⌨️', 'Phím tắt'],
   ['settings', '⚙️', 'Cài đặt'],
 ];
+/** Touch screens have no keyboard shortcuts to list; the button editor takes that place, as in the pause menu. */
+const TOUCH_NAV_BUTTONS: NavButton[] = NAV_BUTTONS.map((b) => (b[0] === 'keys' ? ['controls', '🎛️', 'Chỉnh nút'] : b));
 
 /** Phaser is most of the bundle, so the game code is a separate chunk: fetched in the background after login, awaited on match start. */
 let gameModule: Promise<typeof import('./game/session')> | null = null;
@@ -167,6 +173,10 @@ export class App {
   private user: PublicUser | null = null;
   private socket: Socket | null = null;
   private session: GameSession | null = null;
+  /** The editor on the button editor page; it shares #touch with the match, so leaving the page closes it. */
+  private layoutEditor: TouchControls | null = null;
+  /** Which menu page is showing while the screen is 'panel', so the button editor page can return to it. */
+  private panelNav: PanelNav = 'settings';
   /** Bumped whenever a pending game load must be discarded (newer match, logout, replaced session). */
   private gameLoad = 0;
   private screen: Screen = 'loading';
@@ -285,6 +295,7 @@ export class App {
   private render(screen: Screen, markup: string) {
     // fullscreen turned on by a play button ends when the player backs out without playing (left the queue or room)
     if (PLAY_SCREENS.has(this.screen) && !PLAY_SCREENS.has(screen)) leaveFullscreen();
+    if (screen !== 'controls') this.closeLayoutEditor();
     this.screen = screen;
     this.ui.innerHTML = markup;
     this.ui.classList.toggle('hidden', screen === 'game');
@@ -456,6 +467,7 @@ export class App {
   private onLoggedIn(user: PublicUser) {
     this.user = user;
     setDevtoolsAllowed(user.role === 'admin');
+    if (useTouchControls()) void syncLayouts(user.id);
     this.connect();
     this.showLobby();
     window.setTimeout(() => loadGame().catch(() => undefined), 300);
@@ -464,6 +476,7 @@ export class App {
   private logout() {
     setToken(null);
     this.gameLoad++;
+    this.closeLayoutEditor();
     this.session?.destroy();
     this.session = null;
     if (this.socket?.connected) {
@@ -644,6 +657,7 @@ export class App {
       this.session.resync(msg);
       return;
     }
+    this.closeLayoutEditor();
     this.session?.destroy();
     this.session = null;
     this.queue = null;
@@ -704,7 +718,7 @@ export class App {
         </span>
       </button>
       <div class="row topbar-actions">
-        ${NAV_BUTTONS.map(([nav, icon, label]) => `<button class="btn small tool-btn${nav === current ? ' active' : ''}" data-nav="${nav}" title="${label}" aria-label="${label}"${nav === current ? ' aria-current="page"' : ''}><span>${icon}</span><em>${label}</em></button>`).join('')}
+        ${(useTouchControls() ? TOUCH_NAV_BUTTONS : NAV_BUTTONS).map(([nav, icon, label]) => `<button class="btn small tool-btn${nav === current ? ' active' : ''}" data-nav="${nav}" title="${label}" aria-label="${label}"${nav === current ? ' aria-current="page"' : ''}><span>${icon}</span><em>${label}</em></button>`).join('')}
         <button class="btn small logout-btn" data-nav="logout" title="Đăng xuất" aria-label="Đăng xuất"><i aria-hidden="true">🚪</i><em>Đăng xuất</em></button>
       </div>
     </div>`;
@@ -714,17 +728,23 @@ export class App {
     this.ui.querySelectorAll<HTMLElement>('[data-nav]').forEach((b) =>
       b.addEventListener('click', () => {
         unlockAudio();
-        switch (b.dataset.nav) {
-          case 'lobby': return this.showLobby();
-          case 'logout': return this.logout();
-          case 'profile': return this.showProfile();
-          case 'guide': return this.showPanel('guide', '📖 Hướng dẫn chơi', guidePanel());
-          case 'items': return this.showPanel('items', '🎒 Vật phẩm trong game', itemsPanel());
-          case 'keys': return this.showPanel('keys', '⌨️ Phím tắt', keysPanel());
-          case 'settings': return this.showPanel('settings', '⚙️ Cài đặt', settingsPanel(), bindSettings);
-        }
+        this.navTo(b.dataset.nav as NavKey | 'logout');
       }),
     );
+  }
+
+  private navTo(nav: NavKey | 'logout') {
+    switch (nav) {
+      case 'lobby': return this.showLobby();
+      case 'logout': return this.logout();
+      case 'profile': return this.showProfile();
+      case 'controls': return void this.showControls();
+      case 'guide': return this.showPanel('guide', '📖 Hướng dẫn chơi', guidePanel());
+      case 'items': return this.showPanel('items', '🎒 Vật phẩm trong game', itemsPanel());
+      case 'keys': return this.showPanel('keys', '⌨️ Phím tắt', keysPanel());
+      case 'settings':
+        return this.showPanel('settings', '⚙️ Cài đặt', settingsPanel(true), (root) => bindSettings(root, () => void this.showControls()));
+    }
   }
 
   showLobby() {
@@ -1516,11 +1536,63 @@ export class App {
   }
 
   private showPanel(nav: PanelNav, title: string, body: string, bind?: (root: HTMLElement) => void) {
+    this.panelNav = nav;
     this.render('panel', `
       <div class="screen fit"><div class="container">${this.header(nav)}
         <div class="card fill-card hug"><h2>${title}</h2><div class="card-scroll ui-scroll">${body}</div></div>
       </div></div>`);
     this.bindNav();
     bind?.(this.ui);
+  }
+
+  /**
+   * The button editor page: a sketch of the match screen (so the player sees what a button would cover) with every
+   * touch button on top to drag and resize. Saving or cancelling goes back to the page it was opened from.
+   */
+  private async showControls() {
+    if (this.layoutEditor || this.session || this.screen === 'controls') return;
+    const from = this.screen;
+    const panel = this.panelNav;
+    const back = () => {
+      if (from === 'panel') this.navTo(panel);
+      else if (from === 'profile') this.showProfile();
+      else this.showLobby();
+    };
+    const load = this.gameLoad;
+    let Touch: typeof import('./game/Touch');
+    try {
+      Touch = await import('./game/Touch');
+    } catch (err) {
+      toast(`Không mở được trang chỉnh nút: ${(err as Error).message}`, 'error');
+      return;
+    }
+    // a match started, the player signed out or moved on while the editor was loading
+    if (load !== this.gameLoad || this.layoutEditor || this.session || !this.user || this.screen !== from) return;
+    this.render('controls', `
+      <div class="ctl-page" aria-hidden="true">
+        <div class="ctl-zone left"><span>Vùng cần di chuyển</span></div>
+        <div class="ctl-zone right"><span>Vùng cần ngắm và bắn</span></div>
+        <div class="ctl-map"><span>Bản đồ nhỏ</span></div>
+        <div class="ctl-me"></div>
+        <div class="ctl-bottom"><div class="ctl-hp">100</div><div class="ctl-slots"><i></i><i></i><i></i><i></i></div></div>
+      </div>`);
+    const editor: TouchControls = new Touch.TouchControls(document.getElementById('touch')!, () => undefined, {
+      preview: {
+        onDone: () => {
+          if (this.layoutEditor !== editor) return;
+          this.layoutEditor = null;
+          editor.destroy();
+          back();
+        },
+      },
+    });
+    this.layoutEditor = editor;
+  }
+
+  /** Keeps what was arranged so far. */
+  private closeLayoutEditor() {
+    const editor = this.layoutEditor;
+    this.layoutEditor = null;
+    editor?.destroy();
   }
 }

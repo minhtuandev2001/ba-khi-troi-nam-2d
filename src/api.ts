@@ -1,4 +1,4 @@
-import type { MatchHistoryEntry, PublicUser, UserStats } from './shared';
+import type { MatchHistoryEntry, PublicUser, TouchLayouts, UserStats } from './shared';
 
 const TOKEN_KEY = 'br2d_token';
 
@@ -46,5 +46,7 @@ export const api = {
   stats: () => request<{ stats: UserStats }>('GET', '/me/stats'),
   history: (limit: number, offset: number) =>
     request<{ items: MatchHistoryEntry[]; total: number }>('GET', `/me/history?limit=${limit}&offset=${offset}`),
+  touchLayout: () => request<{ layouts: TouchLayouts }>('GET', '/me/touch-layout'),
+  saveTouchLayout: (layouts: TouchLayouts) => request<{ layouts: TouchLayouts }>('PUT', '/me/touch-layout', { layouts }),
   room: (id: string) => request<{ id: string; name: string; hostName: string; count: number; max: number }>('GET', `/rooms/${id}`),
 };

@@ -49,8 +49,7 @@ export default defineConfig(({ mode }) => {
       rolldownOptions: {
         output: {
           postBanner: '/*! © 2026 Bá Khí - Trời Nam 2D. All rights reserved. Proprietary software, see LICENSE. */',
-          // the developer-tools guard (src/ui/devtoolsGuard.ts) relies on its `debugger` statement
-          minify: { compress: { dropDebugger: false }, mangle: true },
+          minify: { compress: true, mangle: true },
         },
       },
     },

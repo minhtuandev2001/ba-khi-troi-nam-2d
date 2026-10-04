@@ -47,6 +47,8 @@ export interface HudCallbacks {
   mark(at: { x: number; y: number } | null): void;
   /** Only for an admin watching the match: follow another player, or remove the one followed. */
   observe?: { step(dir: 1 | -1): void; kick(pid: number): void };
+  /** Touch devices only: rearrange the on-screen buttons. */
+  editControls?(): void;
 }
 
 /** The kick button needs a second press within this time. */
@@ -78,7 +80,44 @@ const PAUSE_ICONS = {
   keys: lineIcon('<rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6.5 10h.01M10 10h.01M14 10h.01M17.5 10h.01M7.5 14h9"/>'),
   guide: lineIcon('<path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H13v16h5.5a1.5 1.5 0 0 0 1.5-1.5z"/>'),
   leave: lineIcon('<path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/><path d="M10 16l-4-4 4-4M6 12h10"/>'),
+  controls: lineIcon('<path d="M12 3v18M3 12h18M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3"/>'),
 };
+
+/**
+ * Acts the moment a finger or the left mouse button goes down. Browsers send no click for a second finger,
+ * so a click handler would ignore taps made while the other thumb holds a stick.
+ */
+function onPress(el: HTMLElement, fn: (target: HTMLElement) => void) {
+  el.addEventListener('pointerdown', (e) => {
+    if (e.button > 0) return;
+    fn(e.target as HTMLElement);
+  });
+}
+
+/**
+ * Like a click (acts on release, ignores a finger that slid away, so scrolling a list never fires it),
+ * but also for a second finger.
+ */
+function onTap(el: HTMLElement, fn: (target: HTMLElement) => void) {
+  const downs = new Map<number, { x: number; y: number; target: HTMLElement }>();
+  let touchTapAt = 0;
+  el.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'mouse') downs.set(e.pointerId, { x: e.clientX, y: e.clientY, target: e.target as HTMLElement });
+  });
+  el.addEventListener('pointerup', (e) => {
+    const down = downs.get(e.pointerId);
+    if (!down) return;
+    downs.delete(e.pointerId);
+    if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 12) return;
+    touchTapAt = performance.now();
+    fn(down.target);
+  });
+  el.addEventListener('pointercancel', (e) => downs.delete(e.pointerId));
+  // the click a first finger still produces right after its release was already handled above
+  el.addEventListener('click', (e) => {
+    if (performance.now() - touchTapAt > 700) fn(e.target as HTMLElement);
+  });
+}
 
 function scopeCell(level: number, active: boolean): string {
   const id = `scope${level}` as IconId;
@@ -123,10 +162,11 @@ export class Hud {
   private mateAlive = false;
   private trainingStats: TrainingStatsNet | null = null;
   private inLobby = false;
-  private pressing = false;
-  private readonly onRelease = () => {
-    if (!this.pressing) return;
-    this.pressing = false;
+  /** The finger pressing inside an overlay; the other one may be walking, and its release must not count. */
+  private pressing: number | null = null;
+  private readonly onRelease = (e: PointerEvent) => {
+    if (e.pointerId !== this.pressing) return;
+    this.pressing = null;
     // let the click land on the button that was pressed before swapping the markup
     setTimeout(() => {
       if (this.overlay === 'inventory') this.renderInventoryPanel(false);
@@ -180,17 +220,17 @@ export class Hud {
     for (const n of root.querySelectorAll<HTMLElement>('[id^="h-"]')) this.el[n.id.slice(2)] = n;
     this.mapRenderer = new MapRenderer(map);
     this.minimap = this.el.minimap as HTMLCanvasElement;
-    this.minimap.addEventListener('click', () => this.toggle('map'));
+    onTap(this.minimap, () => this.toggle('map'));
     this.el.pause.addEventListener('click', () => this.toggle('pause'));
-    this.el.overlay.addEventListener('pointerdown', () => (this.pressing = true));
+    this.el.overlay.addEventListener('pointerdown', (e) => (this.pressing = e.pointerId));
     window.addEventListener('pointerup', this.onRelease);
     window.addEventListener('pointercancel', this.onRelease);
-    this.el.slots.addEventListener('click', (e) => {
-      const slot = (e.target as HTMLElement).closest<HTMLElement>('[data-slot]')?.dataset.slot as SlotName | undefined;
+    onPress(this.el.slots, (target) => {
+      const slot = target.closest<HTMLElement>('[data-slot]')?.dataset.slot as SlotName | undefined;
       if (slot) this.cb.equip(slot);
     });
-    this.el.scope.addEventListener('click', (e) => {
-      const level = (e.target as HTMLElement).closest<HTMLElement>('[data-scope]')?.dataset.scope;
+    onPress(this.el.scope, (target) => {
+      const level = target.closest<HTMLElement>('[data-scope]')?.dataset.scope;
       if (level) this.cb.setScope(Number(level));
     });
   }
@@ -656,11 +696,13 @@ export class Hud {
         <h3>Chim trinh sát <span class="muted">· bấm để đổi</span></h3>
         <div class="inv-grid scope-grid">${me.scopes.map((s) => scopeCell(s, s === this.scopeActive)).join('')}</div>
       </div></div>`;
-    box.querySelector('[data-close]')?.addEventListener('click', () => this.show('none'));
-    box.querySelectorAll<HTMLElement>('[data-drop]').forEach((b) => b.addEventListener('click', () => this.cb.drop(b.dataset.drop!)));
+    // the drawer stays open while walking, so its buttons must take a tap from the second finger too
+    const close = box.querySelector<HTMLElement>('[data-close]');
+    if (close) onTap(close, () => this.show('none'));
+    box.querySelectorAll<HTMLElement>('[data-drop]').forEach((b) => onTap(b, () => this.cb.drop(b.dataset.drop!)));
     box.querySelectorAll<HTMLElement>('[data-scope]').forEach((b) =>
-      b.addEventListener('click', (e) => {
-        if (!(e.target as HTMLElement).closest('[data-drop]')) this.cb.setScope(Number(b.dataset.scope));
+      onTap(b, (target) => {
+        if (!target.closest('[data-drop]')) this.cb.setScope(Number(b.dataset.scope));
       }),
     );
   }
@@ -685,11 +727,11 @@ export class Hud {
         <button class="btn primary pause-resume" data-v="close">${PAUSE_ICONS.play}<span>Tiếp tục</span>${touch ? '' : '<kbd class="kbd">Esc</kbd>'}</button>
         <div class="pause-tiles">
           ${tile('settings', PAUSE_ICONS.settings, 'Cài đặt')}
-          ${tile('keys', PAUSE_ICONS.keys, 'Phím tắt')}
+          ${touch && this.cb.editControls ? tile('controls', PAUSE_ICONS.controls, 'Chỉnh nút') : tile('keys', PAUSE_ICONS.keys, 'Phím tắt')}
           ${tile('guide', PAUSE_ICONS.guide, 'Hướng dẫn')}
         </div>
         <button class="pause-leave" data-v="${this.cb.observe ? 'leave' : 'confirm'}">${PAUSE_ICONS.leave}${this.cb.observe ? 'Rời xem trận' : this.training ? 'Rời trường bắn' : 'Thoát trận'}</button>`;
-    } else if (view === 'settings') body = `<div class="row between"><h2>Cài đặt</h2>${back}</div>${settingsPanel()}`;
+    } else if (view === 'settings') body = `<div class="row between"><h2>Cài đặt</h2>${back}</div>${settingsPanel(!!this.cb.editControls)}`;
     else if (view === 'keys') body = `<div class="row between"><h2>Phím tắt</h2>${back}</div>${keysPanel()}`;
     else if (view === 'guide') body = `<div class="row between"><h2>Hướng dẫn</h2>${back}</div>${guidePanel()}`;
     else {
@@ -703,15 +745,21 @@ export class Hud {
         <div class="row btn-pair"><button class="btn" data-v="menu">Ở lại</button><button class="btn danger" data-v="leave">Thoát</button></div>`;
     }
     box.innerHTML = `<div class="overlay"><div class="card ${panel}">${body}</div></div>`;
-    if (view === 'settings') bindSettings(box);
+    if (view === 'settings') bindSettings(box, () => this.editControls());
     box.querySelectorAll<HTMLElement>('[data-v]').forEach((b) =>
       b.addEventListener('click', () => {
         const v = b.dataset.v!;
         if (v === 'close') this.show('none');
         else if (v === 'leave') this.cb.leave();
+        else if (v === 'controls') this.editControls();
         else this.renderPause(v as 'menu');
       }),
     );
+  }
+
+  private editControls() {
+    this.show('none');
+    this.cb.editControls?.();
   }
 
   showDeath(msg: DeathMsg, killerAlive: boolean) {
