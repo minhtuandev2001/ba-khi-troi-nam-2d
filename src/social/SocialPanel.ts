@@ -111,6 +111,8 @@ export class SocialPanel {
     document.addEventListener('pointerdown', (e) => {
       if (!this.open || this.wide.matches || !(e.target instanceof Node)) return;
       if (this.drawer.contains(e.target) || this.fab.contains(e.target)) return;
+      // the drawer's own dialogs (mute, delete, unfriend) sit outside it in the DOM
+      if (e.target instanceof Element && e.target.closest('.confirm-modal')) return;
       this.toggle(false);
     });
     this.wide.addEventListener('change', () => {
@@ -227,7 +229,8 @@ export class SocialPanel {
         this.refreshSupportBits();
         break;
       case 'muted':
-        if (change.until) toast(`🔇 Bạn bị quản trị viên cấm chat đến ${timeLabel(change.until)}. Bạn vẫn nhắn được cho quản trị viên ở tab 🛡️ Admin.`, 'error', 8000);
+        if (change.until && change.auto) toast(`🔇 Bạn bị tự động cấm chat đến ${timeLabel(change.until)} vì dùng từ ngữ không phù hợp nhiều lần. Bạn vẫn nhắn được cho quản trị viên ở tab 🛡️ Admin.`, 'error', 8000);
+        else if (change.until) toast(`🔇 Bạn bị quản trị viên cấm chat đến ${timeLabel(change.until)}. Bạn vẫn nhắn được cho quản trị viên ở tab 🛡️ Admin.`, 'error', 8000);
         else toast('Bạn đã được quản trị viên bỏ cấm chat.', 'info', 5000);
         break;
     }
@@ -303,8 +306,9 @@ export class SocialPanel {
       const button = form.querySelector<HTMLButtonElement>('button')!;
       button.disabled = true;
       try {
-        await this.client.send(key, text);
+        const warn = await this.client.send(key, text);
         input.value = '';
+        if (warn) toast(`⚠️ ${warn}`, 'error', 6000);
       } catch (err) {
         toast((err as Error).message, 'error');
       } finally {
@@ -437,13 +441,22 @@ export class SocialPanel {
     this.lastRendered = m;
     const showName = !mine && this.view.kind !== 'dm';
     const admin = m.from.admin === true;
-    return html(`<div class="chat-msg${mine ? ' mine' : ''}${grouped ? ' grouped' : ''}${admin ? ' admin' : ''}">
+    const el = html(`<div class="chat-msg${mine ? ' mine' : ''}${grouped ? ' grouped' : ''}${admin ? ' admin' : ''}">
       ${mine ? '' : `<span class="ui-avatar sm">${grouped ? '' : esc(m.from.avatar)}</span>`}
       <div class="chat-bubble">
         ${grouped ? '' : `<div class="chat-meta">${showName ? `<button type="button" class="chat-name" data-user="${esc(m.from.username)}" title="Tìm để kết bạn">${nameHtml(m.from.username, admin, false)}</button><span class="chat-lv">Cấp ${m.from.level}</span>` : ''}${admin ? adminBadge() : ''}<time datetime="${esc(m.at)}">${timeLabel(m.at)}</time></div>`}
         <div class="chat-text">${esc(m.text)}</div>
+        ${m.raw ? '<button type="button" class="chat-raw" aria-pressed="false" title="Chỉ quản trị viên thấy: nội dung trước khi bộ lọc che">🛡️ Xem gốc</button>' : ''}
       </div>
     </div>`);
+    const rawBtn = el.querySelector<HTMLButtonElement>('.chat-raw');
+    rawBtn?.addEventListener('click', () => {
+      const showRaw = rawBtn.getAttribute('aria-pressed') !== 'true';
+      rawBtn.setAttribute('aria-pressed', String(showRaw));
+      rawBtn.textContent = showRaw ? '🛡️ Ẩn gốc' : '🛡️ Xem gốc';
+      el.querySelector('.chat-text')!.textContent = showRaw ? m.raw! : m.text;
+    });
+    return el;
   }
 
   private isNearBottom(): boolean {

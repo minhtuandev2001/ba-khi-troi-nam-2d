@@ -32,6 +32,7 @@ import {
 } from '../shared';
 import { esc, formatDuration, html } from '../ui/dom';
 import { nameHtml } from '../ui/names';
+import { rotateScreen } from '../ui/orientation';
 import { bindSettings, guidePanel, keysPanel, settingsPanel } from '../ui/panels';
 import { eyeGlyph, iconHtml, iconSvg, rarityCss, scopeGlyph, type IconId } from './icons';
 import { MapRenderer, type MinimapState } from './Minimap';
@@ -184,7 +185,8 @@ export class Hud {
     this.mates = mateColors(roster, you);
     this.teamCount = new Set(roster.map((r) => r.team ?? r.pid)).size;
     root.innerHTML = `
-      <div class="hud-top-left"><div class="hud-pill" id="h-alive">👤 0</div><div class="hud-pill" id="h-kills">💀 0</div></div>
+      <div class="hud-top-left"><div class="hud-pill" id="h-alive">👤 0</div><div class="hud-pill" id="h-kills">💀 0</div>
+        <button type="button" class="hud-pill hud-rotate interactive" id="h-rotate" title="Xoay màn hình" aria-label="Xoay màn hình">🔄</button></div>
       <div class="hud-team hidden" id="h-team"></div>
       <div class="hud-zone" id="h-zone">Đang tải…</div>
       <div class="lobby-panel hidden" id="h-lobby">
@@ -222,6 +224,7 @@ export class Hud {
     this.minimap = this.el.minimap as HTMLCanvasElement;
     onTap(this.minimap, () => this.toggle('map'));
     this.el.pause.addEventListener('click', () => this.toggle('pause'));
+    onTap(this.el.rotate, () => void rotateScreen());
     this.el.overlay.addEventListener('pointerdown', (e) => (this.pressing = e.pointerId));
     window.addEventListener('pointerup', this.onRelease);
     window.addEventListener('pointercancel', this.onRelease);

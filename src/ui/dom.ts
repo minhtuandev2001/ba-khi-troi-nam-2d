@@ -32,20 +32,28 @@ export interface ConfirmOptions {
   confirmText?: string;
   cancelText?: string;
   danger?: boolean;
+  /** For actions that cannot be undone: confirming stays disabled until exactly this is typed. */
+  typeToConfirm?: string;
 }
 
 /** In-game replacement for window.confirm: resolves true on confirm, false on cancel, Escape or a backdrop click. */
-export function confirmDialog({ title, message, confirmText = 'Đồng ý', cancelText = 'Huỷ', danger = false }: ConfirmOptions): Promise<boolean> {
+export function confirmDialog({ title, message, confirmText = 'Đồng ý', cancelText = 'Huỷ', danger = false, typeToConfirm }: ConfirmOptions): Promise<boolean> {
   return new Promise((resolve) => {
     const box = html(`<div class="overlay confirm-modal" role="dialog" aria-modal="true">
       <div class="card">
         <h2>${esc(title)}</h2>
         ${message ? `<p>${esc(message)}</p>` : ''}
+        ${typeToConfirm ? `<label class="field confirm-type"><span>Gõ <b>${esc(typeToConfirm)}</b> để xác nhận</span>
+          <input class="input" autocomplete="off" autocapitalize="off" spellcheck="false" /></label>` : ''}
         <div class="row btn-pair">
           <button class="btn" data-a="cancel">${esc(cancelText)}</button>
-          <button class="btn ${danger ? 'danger' : 'primary'}" data-a="ok">${esc(confirmText)}</button>
+          <button class="btn ${danger ? 'danger' : 'primary'}" data-a="ok" ${typeToConfirm ? 'disabled' : ''}>${esc(confirmText)}</button>
         </div>
       </div></div>`);
+    const okBtn = box.querySelector<HTMLButtonElement>('[data-a="ok"]')!;
+    const typed = box.querySelector<HTMLInputElement>('.confirm-type input');
+    const allowed = () => !typed || typed.value.trim() === typeToConfirm;
+    typed?.addEventListener('input', () => (okBtn.disabled = !allowed()));
     const previous = document.activeElement as HTMLElement | null;
     const done = (ok: boolean) => {
       window.removeEventListener('keydown', onKey, true);
@@ -58,17 +66,18 @@ export function confirmDialog({ title, message, confirmText = 'Đồng ý', canc
       if (e.key !== 'Escape' && e.key !== 'Enter') return;
       e.preventDefault();
       e.stopPropagation();
-      done(e.key === 'Enter');
+      if (e.key === 'Escape') done(false);
+      else if (allowed()) done(true);
     };
     box.addEventListener('click', (e) => {
       const t = e.target as HTMLElement;
       if (t === box) return done(false);
       const a = t.closest<HTMLElement>('[data-a]')?.dataset.a;
-      if (a) done(a === 'ok');
+      if (a === 'cancel' || (a === 'ok' && allowed())) done(a === 'ok');
     });
     window.addEventListener('keydown', onKey, true);
     document.body.appendChild(box);
-    box.querySelector<HTMLElement>('[data-a="ok"]')!.focus();
+    (typed ?? okBtn).focus();
   });
 }
 

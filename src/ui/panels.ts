@@ -50,8 +50,9 @@ export function keysPanel(): string {
     <h3>Trên điện thoại</h3>
     <ul class="muted">
       <li>Chạm và kéo nửa trái màn hình để di chuyển.</li>
-      <li>Chạm và kéo nửa phải màn hình để ngắm, kéo xa tâm sẽ tự bắn.</li>
-      <li>Khi cầm hũ lửa hoặc bầu khói: kéo để ngắm, kéo càng xa thì ném càng xa, thả tay để ném.</li>
+      <li>Chạm và kéo nửa phải màn hình để xoay người (chỉ xoay, không bắn).</li>
+      <li>Giữ nút bắn (vòng ngắm viền đỏ, mặc định ở nửa trái phía trên cần di chuyển) để bắn.</li>
+      <li>Khi cầm hũ lửa hoặc bầu khói: giữ nút bắn rồi thả tay để ném. Đang kéo cần xoay lúc thả thì kéo càng xa ném càng xa, không kéo thì ném tầm vừa.</li>
       <li>Chạm vào ô vũ khí ở dưới để đổi vũ khí. Các nút bên phải: Nhặt, Nạp tên, Thuốc nam, Hũ lửa, Bầu khói.</li>
       <li>Mở bản đồ lớn rồi chạm lên bản đồ để cắm cờ đánh dấu, chạm lại vào cờ để gỡ.</li>
     </ul>`;
@@ -160,7 +161,7 @@ export function settingsPanel(canEditLayout = false): string {
       <div class="slider-row"><input type="range" min="0" max="100" value="${Math.round(s.volume * 100)}" data-setting="volume" /></div></div>
     <div class="field"><label><input type="checkbox" data-setting="sfx" ${s.sfx ? 'checked' : ''}/> Bật hiệu ứng âm thanh</label></div>
     <div class="field"><label><input type="checkbox" data-setting="ambient" ${s.ambient ? 'checked' : ''}/> Âm thanh môi trường (gió, sóng, chim hót)</label></div>
-    <div class="field"><label><input type="checkbox" data-setting="music" ${s.music ? 'checked' : ''}/> Nhạc nền ngoài trận (trống đồng, sáo trúc, cồng chiêng)</label></div>
+    <div class="field"><label><input type="checkbox" data-setting="music" ${s.music ? 'checked' : ''}/> Nhạc nền (trống đồng, sáo trúc, cồng chiêng; mỗi bản đồ một bài riêng)</label></div>
     <div class="field"><label><input type="checkbox" data-setting="autoPickup" ${s.autoPickup ? 'checked' : ''}/> Tự động nhặt (tên, thuốc nam, hũ lửa, bầu khói, chim khi đi qua)</label></div>
     <div class="field"><label><input type="checkbox" data-setting="damageNumbers" ${s.damageNumbers ? 'checked' : ''}/> Hiện số sát thương</label></div>
     <div class="field"><label><input type="checkbox" data-setting="screenShake" ${s.screenShake ? 'checked' : ''}/> Rung màn hình</label></div>

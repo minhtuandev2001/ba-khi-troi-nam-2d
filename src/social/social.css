@@ -66,6 +66,9 @@
 .chat-name { padding: 0; border: 0; background: none; color: #ffe39a; font-size: 13px; font-weight: 800; cursor: pointer; }
 .chat-name:hover { text-decoration: underline; }
 .chat-text { font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+/* admins only: shows what the profanity filter masked */
+.chat-raw { margin-top: 3px; padding: 1px 7px; border: 1px dashed currentColor; border-radius: 999px; background: none; color: inherit; font-size: 11px; font-weight: 800; opacity: 0.75; cursor: pointer; }
+.chat-raw:hover, .chat-raw[aria-pressed='true'] { opacity: 1; }
 
 /* admin messages: lacquer-red bubble with a gold frame and an inner engraved line, mine or not */
 .chat-msg.admin .chat-bubble {

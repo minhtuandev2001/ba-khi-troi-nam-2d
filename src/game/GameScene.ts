@@ -7,6 +7,7 @@ import {
   MAP_DEFS,
   PLAYER_RADIUS,
   SCOPE_VIEW_MULTIPLIER,
+  THROWABLE,
   WALL_THICKNESS,
   WEAPONS,
   angleDiff,
@@ -207,10 +208,16 @@ class PlayerView {
     if (admin) this.label?.setShadow(0, 0, '#ff8a1f', 8, true, false);
   }
 
-  update(x: number, y: number, a: number, weapon: WeaponId, armor: ArmorLevel, bag: BagLevel, flags: number, dt: number) {
+  get heldWeapon(): WeaponId | null {
+    return this.weapon;
+  }
+
+  /** True when the player swapped from one weapon to another (not when first drawn). */
+  update(x: number, y: number, a: number, weapon: WeaponId, armor: ArmorLevel, bag: BagLevel, flags: number, dt: number): boolean {
     this.container.setPosition(x, y);
     this.container.rotation = a;
     this.label?.setPosition(x, y - PLAYER_RADIUS - 8);
+    const swapped = this.weapon !== null && weapon !== this.weapon;
     if (weapon !== this.weapon) this.setWeapon(weapon);
     if (armor !== this.armor) {
       this.armor = armor;
@@ -229,6 +236,7 @@ class PlayerView {
       if (weapon === 'fists') this.animatePunch(t);
       else if (weapon === 'knife') this.animateSlash(t);
     }
+    return swapped;
   }
 
   /** Jab with one hand; hands alternate between punches. */
@@ -709,7 +717,7 @@ export class GameScene extends Phaser.Scene {
       case 'melee': {
         this.players.get(e.pid)?.punch();
         const v = this.players.get(e.pid);
-        if (v) sfx.melee(at(v.container.x, v.container.y));
+        if (v) sfx.melee(e.w, at(v.container.x, v.container.y));
         break;
       }
       case 'boom': {
@@ -723,7 +731,7 @@ export class GameScene extends Phaser.Scene {
       }
       case 'reload': {
         const v = this.players.get(e.pid);
-        if (v) sfx.reload(at(v.container.x, v.container.y));
+        if (v?.heldWeapon) sfx.reload(v.heldWeapon, at(v.container.x, v.container.y));
         break;
       }
       case 'throw': {
@@ -801,8 +809,11 @@ export class GameScene extends Phaser.Scene {
         v = new PlayerView(this, p.pid, isSelf ? null : s.nameOf(p.pid), isSelf, this.textResolution, s.mates.get(p.pid) ?? null, s.isAdmin(p.pid));
         this.players.set(p.pid, v);
       }
+      // someone stepping back into view already holding something else is not a swap worth hearing
+      const wasInView = now - v.lastSeen < 400;
       v.lastSeen = now;
-      v.update(p.x, p.y, p.a, p.weapon, p.armor, p.bag, p.flags, delta);
+      const swapped = v.update(p.x, p.y, p.a, p.weapon, p.armor, p.bag, p.flags, delta);
+      if (swapped && wasInView) sfx.equip(p.weapon, spotAt(p.x - view.x, p.y - view.y), p.pid === s.viewPid);
       v.container.setVisible(true);
       v.label?.setVisible(true);
     }
@@ -850,7 +861,7 @@ export class GameScene extends Phaser.Scene {
 
     this.drawTracers(now);
     this.syncThrowables();
-    this.syncSmokes();
+    this.syncSmokes(view);
     this.syncAirdrops();
     if (this.training) this.syncBoars(delta);
     else this.drawZone();
@@ -937,7 +948,7 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private syncSmokes() {
+  private syncSmokes(listener: { x: number; y: number }) {
     const seen = new Set<number>();
     for (const [id, x, y, r] of this.session.smokes) {
       seen.add(id);
@@ -945,6 +956,8 @@ export class GameScene extends Phaser.Scene {
       if (!v) {
         v = this.add.circle(x, y, Math.max(1, r), 0xd9d9d9, 0.92).setDepth(40);
         this.smokeViews.set(id, v);
+        // the server sends no event when a gourd bursts; a cloud that is still spreading has only just opened
+        if (r < THROWABLE.smoke.radius * 0.5) sfx.smoke(spotAt(x - listener.x, y - listener.y));
       }
       v.radius += (Math.max(1, r) - v.radius) * 0.3;
     }

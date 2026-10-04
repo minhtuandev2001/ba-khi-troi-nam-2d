@@ -4,11 +4,13 @@ import { App } from './app';
 import { sfx, unlockOnFirstGesture } from './game/audio';
 import { preloadIcons } from './game/icons';
 import { printConsoleNotice } from './license';
+import { initTabletLandscape } from './ui/orientation';
 import { applyTheme } from './ui/theme';
 
 printConsoleNotice();
 applyTheme();
 unlockOnFirstGesture();
+initTabletLandscape();
 
 // Phaser rasterises text once, so the font has to be ready before a match starts.
 void document.fonts?.load("700 16px 'Baloo 2'").catch(() => undefined);

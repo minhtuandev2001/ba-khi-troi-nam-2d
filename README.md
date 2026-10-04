@@ -27,6 +27,8 @@ Kiểm tra kiểu: `npm run typecheck`.
 
 `VITE_API_URL` được gắn vào lúc build, nên đổi giá trị thì phải build lại. Bên backend phải thêm domain của frontend vào `CLIENT_ORIGIN`. Link mời có dạng `https://<domain>/?room=<uuid>`, nên không cần cấu hình chuyển hướng cho SPA.
 
+Mã QR mời vào phòng (`src/ui/qr.ts`, thư viện `uqr` chỉ tải khi bấm nút): trong phòng chờ, nút **📱 Hiện mã QR cho người khác quét** mở hộp thoại có mã QR của link mời (kèm tên phòng, mã phòng, nút sao chép link). Người khác quét bằng camera điện thoại là mở link, chưa có tài khoản thì đăng ký xong tự vào phòng. Điện thoại cầm ngang thì mã QR nằm bên trái, chữ bên phải để vừa màn hình. Hộp thoại vẫn mở khi có người vào/ra phòng, tự đóng khi rời phòng hoặc trận bắt đầu. Link lấy theo địa chỉ trang đang mở, nên khi chạy dev bằng `localhost` thì máy khác quét sẽ không vào được (hộp thoại có cảnh báo): mở trang bằng IP mạng LAN của máy (dev server đã bật `host: true`, ví dụ `http://192.168.1.5:5173`; nếu backend từ chối kết nối thì thêm địa chỉ đó vào `CLIENT_ORIGIN`) hoặc dùng bản đã deploy.
+
 Bản build hỗ trợ Chrome/Edge 80+, Firefox 78+, Safari/iOS 14+.
 
 Bảo mật: lúc build, Vite chèn thẻ `Content-Security-Policy` vào `index.html`, chỉ cho chạy script của chính trang và chỉ cho kết nối tới backend trong `VITE_API_URL`. Khi chạy dev thì không có CSP. Các header không đặt được bằng thẻ meta (chống nhúng iframe, HSTS, nosniff...) nằm trong `public/_headers` (Netlify, Cloudflare Pages) và `vercel.json` (Vercel). Dùng Nginx thì chép các header đó vào cấu hình. Muốn kiểm tra CSP trước khi deploy thì chạy `npm run build && npx vite preview`.
@@ -56,7 +58,8 @@ Bản quyền: dự án dùng giấy phép độc quyền trong `LICENSE` ở th
 ## Cấu trúc
 
 ```
-src/app.ts          các màn hình menu: đăng nhập/đăng ký, sảnh (kèm danh sách phòng đang mở bên trái: trên máy tính là panel cố định ở mép trái giống khung chat bên phải, tablet và điện thoại nằm cùng các thẻ chế độ; admin có thêm tab trận đang đấu; và hộp thoại tạo phòng có tên), hàng chờ, phòng bạn bè, hồ sơ (kèm lịch sử trận)
+src/app.ts          các màn hình menu: đăng nhập/đăng ký, sảnh (kèm danh sách phòng đang mở bên trái: trên máy tính là panel cố định ở mép trái giống khung chat bên phải, tablet và điện thoại nằm cùng các thẻ chế độ; admin có thêm tab trận đang đấu; và hộp thoại tạo phòng có tên), hàng chờ, phòng bạn bè (kèm mã QR mời), trang chỉnh nút cảm ứng, hồ sơ (kèm lịch sử trận)
+src/ui/qr.ts        hộp thoại mã QR của link mời vào phòng
 src/license.ts      thông báo bản quyền in ra console
 src/ui/devtoolsGuard.ts  chặn công cụ nhà phát triển với người không phải admin
 src/ui/names.ts     hiển thị tên người chơi; tài khoản admin có tên mạ vàng và huy hiệu "Quản trị"
@@ -73,7 +76,8 @@ src/game/Hud.ts     thanh máu, ô vũ khí, kill feed, túi đồ, bản đồ,
 src/game/Minimap.ts minimap và bản đồ lớn, cờ đánh dấu và đường nét đứt tới cờ
 src/game/Touch.ts   điều khiển cảm ứng và trình chỉnh nút (trong trận, hoặc chế độ xem trước mở từ sảnh)
 src/ui/touchLayout.ts  bố cục nút cảm ứng: bản sao trong trình duyệt, đồng bộ với tài khoản
-src/game/audio.ts   âm thanh tổng hợp bằng WebAudio (không dùng file), có âm thanh môi trường và nhạc nền ngoài trận
+src/game/audio.ts   âm thanh tổng hợp bằng WebAudio (không dùng file): hiệu ứng, âm thanh môi trường, nhạc sảnh và nhạc riêng của từng bản đồ trong trận
+src/ui/orientation.ts  máy tính bảng tự xoay ngang ở mọi trang
 src/game/icons.ts   biểu tượng vật phẩm vẽ bằng SVG và bảng độ hiếm
 src/shared/         hằng số, vật phẩm, bản đồ, va chạm, giao thức mạng, kiểm tra bố cục nút cảm ứng
 ```
@@ -99,13 +103,50 @@ Tự nhặt tên, thuốc nam, hũ lửa, bầu khói và chim khi đi qua là t
 | Tab / M | Túi đồ / bản đồ lớn |
 | Esc | Tạm dừng, cài đặt |
 
-Trên điện thoại và máy tính bảng: cần điều khiển bên trái để di chuyển, cần điều khiển bên phải để ngắm (đẩy mạnh là bắn, thả tay ra là ném hũ lửa). Điều khiển cảm ứng tự hiện trên điện thoại và máy tính bảng (máy tính dùng bàn phím và chuột), cỡ chung của mọi nút chỉnh được trong cài đặt. Vị trí mặc định của nút nằm trong `style.css` (class `t-<tên nút>`).
+Trên điện thoại và máy tính bảng: cần điều khiển bên trái để di chuyển, cần điều khiển bên phải chỉ để xoay người. Bắn bằng nút bắn riêng (`t-fire`, vòng ngắm viền đỏ, to gấp rưỡi nút thường) nằm cùng bên trái với cần di chuyển, phía trên và lệch vào trong chỗ ngón cái trái đặt: giữ là bắn liên tục. Đang cầm hũ lửa hay bầu khói thì thả nút bắn là ném; tầm ném theo độ kéo của cần xoay lúc thả (không kéo thì 60% tầm tối đa). Không giữ cần xoay mà vừa đi vừa bắn thì bắn theo hướng đi. Nút bắn dời chỗ và đổi cỡ được trong trình chỉnh nút như các nút khác. Điều khiển cảm ứng tự hiện trên điện thoại và máy tính bảng (máy tính dùng bàn phím và chuột), cỡ chung của mọi nút chỉnh được trong cài đặt. Vị trí mặc định của nút nằm trong `style.css` (class `t-<tên nút>`).
 
 - **Điện thoại phải cầm ngang.** Cầm dọc trong trận thì hiện thẻ "Xoay ngang điện thoại để chơi" che trận (trận vẫn chạy, xoay ngang là chơi tiếp).
 - **Toàn màn hình** (`src/ui/fullscreen.ts`, chỉ trên điện thoại có hỗ trợ, tức Android): trình duyệt chỉ cho bật ngay trong lúc người chơi bấm, nên trang bật toàn màn hình khi bấm nút dẫn vào trận (Tìm trận, chọn bản đồ đấu bot, Vào tập bắn, trưởng nhóm bấm Tìm trận, chủ phòng bấm Bắt đầu). Vào trận thì khoá màn hình nằm ngang. Ai vào trận mà không tự bấm (thành viên phòng, thành viên nhóm) thì được bật ở lần chạm đầu tiên trong trận, hoặc bằng nút trên thẻ nhắc xoay. Rời trận, huỷ tìm trận hay rời phòng/nhóm về sảnh thì thoát toàn màn hình (chỉ khi do game bật). iPhone không cho trang web bật toàn màn hình hay khoá xoay nên chỉ nhắc xoay.
-- **Bố cục khi cầm ngang:** tạm dừng, chim trinh sát, bản đồ, túi đồ xếp thành một hàng ở góc trên bên trái. Nhặt, nạp tên, thuốc nam, bầu khói, hũ lửa ôm góc dưới bên phải thành hình chữ L, chừa phần bên trong cho cần ngắm. Thanh máu và ô vũ khí thu gọn ở giữa cạnh dưới (ô có vũ khí chỉ hiện icon và số tên). Dải chọn chim được ẩn (đổi chim bằng nút chim), bảng hạ gục chỉ hiện 3 dòng mới nhất.
-- **Máy tính bảng** chơi được cả dọc lẫn ngang với bố cục cũ: các nút hành động ở góc dưới bên phải, các nút công cụ xếp dọc bên trái.
+- **Bố cục khi cầm ngang:** tạm dừng, chim trinh sát, bản đồ, túi đồ xếp thành một hàng ở góc trên bên trái. Nhặt, nạp tên, thuốc nam, bầu khói, hũ lửa ôm góc dưới bên phải thành hình chữ L, chừa phần bên trong cho cần xoay. Nút bắn ở nửa trái, phía trên cần di chuyển. Thanh máu và ô vũ khí thu gọn ở giữa cạnh dưới (ô có vũ khí chỉ hiện icon và số tên). Dải chọn chim được ẩn (đổi chim bằng nút chim), bảng hạ gục chỉ hiện 3 dòng mới nhất.
+- **Máy tính bảng tự xoay ngang ở mọi trang** (sảnh, phòng, hồ sơ, trận đấu...), không cần bấm nút (`src/ui/orientation.ts`, gọi từ `main.ts`). "Máy tính bảng" được xác định theo kích thước hiển thị hiện tại của trang: thiết bị cảm ứng (con trỏ thô), không phải cỡ điện thoại (rộng trên 600px và cao trên 500px) và không quá cỡ màn hình máy tính (cả hai chiều tối đa 1500px), xem `isTablet` trong `src/ui/fullscreen.ts`; kiểm tra lại mỗi khi trang đổi kích thước (`body.tablet-ui`). Điện thoại và máy tính giữ nguyên như cũ.
+  - Trình duyệt chỉ cho khoá xoay trong lúc người dùng chạm, và Android cần bật toàn màn hình mới khoá được, nên lần chạm đầu tiên ở bất kỳ đâu trên trang sẽ bật toàn màn hình và khoá ngang (`screen.orientation.lock('landscape')`). Rời trận không bỏ khoá này.
+  - Khi máy tính bảng đang cầm dọc mà chưa khoá được (Safari trên iPad không cho trang web xoay, hoặc người chơi đã thoát toàn màn hình), thẻ "Xoay ngang máy tính bảng" che trang. Thẻ có nút "Xoay ngang" (chỉ hiện khi trình duyệt có hỗ trợ khoá; bị từ chối thì thẻ nhắc tự xoay máy) và nút "Vẫn dùng màn hình dọc" để ẩn thẻ đến hết lần truy cập này (`sessionStorage` khoá `br2d_portrait_ok`). Chạm vào nút này không kích hoạt khoá tự động.
+  - Bố cục nút trong trận của máy tính bảng giữ như cũ: các nút hành động ở góc dưới bên phải, các nút công cụ xếp dọc bên trái.
 - **Tự chỉnh nút**, ngoài trận có **trang Chỉnh nút** riêng (màn `controls` trong `src/app.ts`): mở bằng nút "🎛️ Chỉnh nút" trên thanh điều hướng (thiết bị cảm ứng thấy nút này thay cho "Phím tắt"), hoặc nút "Chỉnh vị trí và cỡ từng nút" trong Cài đặt. Trang vẽ phác màn hình trận theo đúng cỡ HUD thật (bản đồ nhỏ, thanh máu, ô vũ khí, vùng cần di chuyển và cần ngắm) để thấy nút có che gì không; Lưu hoặc Huỷ thì quay lại trang vừa mở nó, rời trang bằng cách khác (trận bắt đầu, đăng xuất) thì tự lưu. Trong trận: Tạm dừng → "Chỉnh nút" (thay cho ô "Phím tắt"), hoặc nút tương tự trong Cài đặt của menu tạm dừng; trận vẫn chạy phía sau lớp mờ. Mọi nút hiện ra với viền nét đứt. Kéo nút để dời chỗ (luôn giữ trọn trong màn hình), chạm một nút rồi kéo thanh "Cỡ" để đổi cỡ riêng nút đó (60–200%, nhân thêm với cỡ chung trong cài đặt). Bảng chỉnh kéo được bằng phần tiêu đề nếu che nút. "Lưu" giữ lại, "Huỷ" bỏ thay đổi, "Mặc định" trả mọi nút về chỗ cũ. Mở menu khác giữa chừng trong trận (vuốt quay lại, bị hạ, hết trận) thì tự lưu. Mở trang Chỉnh nút trên điện thoại cầm dọc thì có thẻ nhắc xoay ngang (bố cục điện thoại dành cho lúc cầm ngang), kèm nút "Để sau".
   - Bố cục **lưu vào tài khoản** (cột `users.touch_layout`, API `GET`/`PUT /api/me/touch-layout`), riêng cho từng kiểu màn hình: điện thoại cầm ngang, màn hình ngang (máy tính bảng), màn hình dọc. Vị trí lưu theo tỉ lệ chiều rộng/chiều cao màn hình nên vẫn đúng khi kích thước đổi chút ít; nút chưa chỉnh vẫn theo vị trí mặc định trong `style.css`.
   - `src/ui/touchLayout.ts` giữ một bản sao trong trình duyệt (`localStorage` khoá `br2d_touch_layout`, ghi kèm id tài khoản) để trận vào ngay không chờ máy chủ, và vẫn chỉnh được khi mất mạng. Đăng nhập trên thiết bị cảm ứng thì tải bố cục của tài khoản về thay bản sao (bản sao của tài khoản khác không bao giờ được dùng). Bố cục chỉnh từ trước khi có tính năng này (chưa gắn tài khoản) được tự đẩy lên tài khoản nếu tài khoản chưa có. Bấm "Lưu" thì ghi bản sao ngay rồi gửi lên máy chủ; gửi lỗi thì báo, máy này vẫn dùng được.
 - **Chạm nhiều ngón:** đang giữ cần di chuyển (hoặc cần ngắm) vẫn bấm được nút khác bằng ngón thứ hai: ô vũ khí, dải chọn chim trinh sát, bản đồ nhỏ, các ô trong túi đồ. Trình duyệt không gửi `click` cho ngón thứ hai nên các chỗ này nghe sự kiện con trỏ (`pointerdown`/`pointerup`, xem `onPress`/`onTap` trong `src/game/Hud.ts`) và đặt `touch-action: none` để trình duyệt không giành cú chạm.
+
+## Âm thanh và nhạc
+
+Mọi âm thanh được tổng hợp bằng WebAudio trong `src/game/audio.ts`, không có file âm thanh. Âm thanh trong trận có hướng (trái/phải) và nhỏ, đục dần theo khoảng cách.
+
+- **Hiệu ứng** (gọi từ `GameScene.handleEvent` và vòng `update`):
+  - Nạp tên: riêng từng vũ khí và trải đều theo thời gian nạp của vũ khí đó, tiếng cuối rơi đúng lúc nạp xong. Ống thổi là túi kim tre và tiếng gõ ống; cung là tiếng rút tên khỏi ống và lắp tên; nỏ là tiếng quay tay quay lách cách, chốt nặng rồi khoá; thần tiễn là tiếng kéo dây kẽo kẹt và tiếng ngân đồng.
+  - Đổi vũ khí (`sfx.equip`): cầm dao nghe tiếng rút dao khỏi vỏ ngân kim loại, mỗi loại súng một tiếng riêng (tre, gỗ, dây cung, đồng). Server không gửi sự kiện đổi vũ khí, nên client so vũ khí của từng người giữa hai lần cập nhật; người vừa đi vào tầm nhìn đã cầm sẵn vũ khí khác thì không phát.
+  - Vung dao "vút" sắc và có ánh kim; đấm tay không là tiếng gió đục hơn.
+  - Ném hũ lửa hay bầu khói: tiếng lấy đà, vung tay, rồi tiếng vật xoay vù vù bay đi.
+  - Bầu khói vỡ: tiếng nứt vỏ bầu rồi tiếng xì kéo dài khi khói tuôn ra. Server không gửi sự kiện riêng cho khói, nên tiếng phát khi một đám khói còn đang lan (bán kính dưới một nửa) xuất hiện lần đầu.
+  - Hũ lửa nổ: tiếng vỡ sành, tiếng dầu bắt lửa "phừng" trầm, rồi tiếng lửa cháy ù ù và lách tách.
+- **Nhạc nền** (bật/tắt bằng ô "Nhạc nền" trong Cài đặt): ở sảnh là bản hành khúc hào hùng thời Hùng Vương (Rê thứ, có tiếng hô). Vào trận (`setMatchMusic` trong `session.ts`) thì chuyển sang bài riêng của bản đồ, khác hẳn nhạc sảnh: không có tiếng hô, khoảng lặng nhiều hơn, thêm một lớp đàn dây trầm ngân dài thở ra thở vào, có các nốt nghịch (quãng 6 thứ, quãng 2 thứ) tạo cảm giác bất an. Mỗi bài 16 ô nhịp, cuối bài có hồi trống dẫn về đầu.
+
+  Nhạc trận đổi theo diễn biến (`updateMusicTension` trong `session.ts`, gọi `setMusicTension`; đổi ở đầu ô nhịp kế tiếp):
+
+  | Mức | Khi nào | Nghe thế nào |
+  | --- | --- | --- |
+  | 0 · dò đường | mặc định, đang ở khu chờ, trận đã kết thúc | tiết tấu thưa, giai điệu nhỏ hơn, lớp đàn dây chỉ có quãng 6 thứ rất khẽ |
+  | 1 · giao tranh | 6–10 giây sau khi trúng đòn, gây sát thương, có tiếng bắn hoặc nổ trong khoảng 650–700 px quanh tầm nhìn; vòng bo đang thu; hai vòng bo cuối; còn ít hơn 40% người chơi | tiết tấu dồn, tiếng tích tắc như đồng hồ, tiếng gió cuộn lên mỗi 4 ô nhịp, nhạc to và sáng hơn |
+  | 2 · sinh tử | còn rất ít người (tối đa 3, hoặc 25%), hoặc đang giao tranh khi máu ≤ 35 hay ở hai vòng bo cuối | nhịp tim thình thịch, tích tắc dày gấp đôi, bè trầm lắc giữa nốt gốc và quãng 2 thứ, đàn tranh rung ở nốt cao, lớp đàn dây nghịch hẳn; lúc bước vào có một tiếng cồng và trống đồng nặng |
+
+  Ở Trường Tập Bắn, tự mình bắn hay bắn trúng lợn không tính là giao tranh, để nhạc không dồn dập khi đang tập.
+
+  | Bản đồ | Nhịp độ | Điệu thức | Đặc trưng |
+  | --- | --- | --- | --- |
+  | Nước Văn Lang | 104 | Đô thứ | chiến tranh đang nhen: tù và trầm bám quãng 2 thứ, trống phi ngựa 3-3-2, sáo dừng lửng trên hợp âm át ở cuối mỗi nửa bài |
+  | Thành Cổ Loa | 124 | Mi thứ ngũ cung | căng và nhanh, đàn tranh gõ đều như lẫy nỏ, mõ, tù và dồn |
+  | Núi Nghĩa Lĩnh | 80 | La thứ ngũ cung | chậm và huyền bí: đàn bầu, cồng chiêng mỗi 4 ô nhịp, đàn đá, trống trầm |
+  | Làng Lạc Việt | 112 | Son trưởng ngũ cung | hội làng: sáo múa, đàn tranh, mõ, sênh tiền, trống tay |
+  | Kinh Đô Phong Châu | 92 | Fa trưởng ngũ cung | nghi lễ cung đình: kèn hiệu, đàn đá, trống đồng, cồng chiêng |
+  | Trường Tập Bắn | 100 | Đô trưởng ngũ cung | nhẹ và đều để tập trung ngắm: đàn tranh, rồi sáo |
+
+  Mỗi bài được khai báo bằng dữ liệu trong `THEMES`: tiết tấu ghi mỗi ký tự là một nốt móc kép, giai điệu ghi dạng `nốt:độ dài` với `|` ngăn các ô nhịp. Các bè dựa trên nốt gốc của từng ô nhịp; nốt nghịch chỉ được thêm có chủ đích để tạo độ hồi hộp.

@@ -37,7 +37,7 @@ export type SocialChange =
   | { type: 'history'; key: ConvoKey }
   | { type: 'unread' }
   | { type: 'support' }
-  | { type: 'muted'; until: string | null };
+  | { type: 'muted'; until: string | null; auto: boolean };
 
 const MAX_KEPT = 200;
 
@@ -74,7 +74,11 @@ export class SocialClient {
     this.me = me;
     socket.on('chat:msg', (m: ChatMessage) => this.receive(m));
     socket.on('friend:changed', () => void this.loadFriends());
-    socket.on('chat:muted', (e: { until?: unknown }) => this.emit({ type: 'muted', until: typeof e?.until === 'string' ? e.until : null }));
+    socket.on('chat:muted', (e: { until?: unknown; auto?: unknown }) =>
+      this.emit({ type: 'muted', until: typeof e?.until === 'string' ? e.until : null, auto: e?.auto === true }));
+    socket.on('chat:purge', (e: { userId?: unknown }) => {
+      if (typeof e?.userId === 'string') this.purge(e.userId);
+    });
     socket.on('friend:presence', (e: { userId: string; presence: Presence }) => {
       const f = this.friend(e.userId);
       if (!f) return;
@@ -105,6 +109,22 @@ export class SocialClient {
     this.inboxLoaded = false;
     this.viewing = null;
     this.friendsLoaded = false;
+  }
+
+  /** A deleted account: its messages and conversations go away. */
+  private purge(userId: string) {
+    this.convos.delete(userId);
+    this.convos.delete(threadKey(userId));
+    for (const [key, c] of this.convos) {
+      const kept = c.messages.filter((m) => m.from.id !== userId);
+      if (kept.length === c.messages.length) continue;
+      c.messages = kept;
+      this.emit({ type: 'history', key });
+    }
+    if (this.inbox.some((t) => t.user.id === userId)) {
+      this.inbox = this.inbox.filter((t) => t.user.id !== userId);
+      this.emit({ type: 'support' });
+    }
   }
 
   setMe(me: PublicUser) {
@@ -208,10 +228,12 @@ export class SocialClient {
     this.emit({ type: 'history', key });
   }
 
-  async send(key: ConvoKey, text: string): Promise<void> {
-    const { message } = await this.call<{ message: ChatMessage }>('chat:send', { to: key === WORLD_CHANNEL ? undefined : key, text });
+  /** Resolves the server's warning when the filter had to mask part of the message. */
+  async send(key: ConvoKey, text: string): Promise<string | undefined> {
+    const { message, warn } = await this.call<{ message: ChatMessage; warn?: string }>('chat:send', { to: key === WORLD_CHANNEL ? undefined : key, text });
     this.push(key, message);
     if (this.isAdmin) this.touchThread(message);
+    return warn;
   }
 
   search(q: string) {
@@ -221,6 +243,11 @@ export class SocialClient {
   /** Admins only: bans a player from world chat and DMs for `minutes`, 0 lifts the ban. Resolves the ban's end. */
   mute(userId: string, minutes: number) {
     return this.call<{ until: string | null }>('admin:mute', { userId, minutes }).then((r) => r.until);
+  }
+
+  /** Admins only: deletes a player's account for good. */
+  deleteUser(userId: string) {
+    return this.call<{ username: string }>('admin:deleteUser', { userId }).then((r) => r.username);
   }
 
   async requestFriend(target: { username?: string; userId?: string }) {

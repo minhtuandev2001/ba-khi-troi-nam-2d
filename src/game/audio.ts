@@ -1,10 +1,10 @@
-import { ITEMS, type ItemId, type WeaponId } from '../shared';
+import { ITEMS, WEAPONS, type ItemId, type MapId, type WeaponId } from '../shared';
 import { onSettingsChange, settings } from '../settings';
 
 // Every sound is synthesised with WebAudio, so the game ships no audio files.
 // Mix: voices -> (distance lowpass) -> (stereo pan) -> sfx bus ─┐
 //      ambience --------------------------------> ambient bus ─┤
-//      menu music -> (echo) ----------------------> music bus ─┴-> master -> compressor -> speakers
+//      menu or map theme -> (echo) ---------------> music bus ─┴-> master -> compressor -> speakers
 
 /** Where a sound is relative to the listener. */
 export interface Spot {
@@ -297,10 +297,63 @@ export const sfx = {
     if (v) gun.play(v, vary());
   },
 
-  melee(spot: Spot) {
-    const v = voice(spot, 0.35, 0.2, { key: 'melee', gap: 40 });
+  /** A knife slash cuts the air with a thin, bright "vút" and a glint of the blade; a punch is a duller rush. */
+  melee(weapon: WeaponId, spot: Spot) {
+    const knife = weapon === 'knife';
+    const v = voice(spot, knife ? 0.5 : 0.38, 0.3, { key: 'melee', gap: 40 });
     if (!v) return;
-    noise(v, { vol: 0.5, attack: 0.03, decay: 0.12, type: 'bandpass', freq: 700 * vary(), freqTo: 2600, q: 1.2 });
+    const p = vary();
+    if (knife) {
+      noise(v, { vol: 0.75, attack: 0.025, decay: 0.13, type: 'bandpass', freq: 1600 * p, freqTo: 5200, q: 2.2 });
+      noise(v, { vol: 0.35, attack: 0.03, decay: 0.16, type: 'bandpass', freq: 500 * p, freqTo: 1300, q: 1 });
+      tone(v, { at: 0.05, vol: 0.06, attack: 0.004, decay: 0.12, freq: 3400 * p });
+      tone(v, { at: 0.05, vol: 0.04, attack: 0.004, decay: 0.09, freq: 4870 * p });
+    } else {
+      noise(v, { vol: 0.6, attack: 0.03, decay: 0.12, type: 'bandpass', freq: 450 * p, freqTo: 1500, q: 1.2 });
+      noise(v, { vol: 0.25, decay: 0.05, type: 'bandpass', freq: 1300, q: 1 });
+    }
+  },
+
+  /** Taking a weapon in hand: each one sounds like what it is made of, the knife rings as it leaves the sheath. */
+  equip(weapon: WeaponId, spot: Spot, own = false) {
+    const v = voice(spot, own ? 0.42 : 0.36, 0.6, { key: own ? 'equip-own' : 'equip', gap: 70, important: own });
+    if (!v) return;
+    const p = vary(0.06);
+    switch (weapon) {
+      case 'knife':
+        noise(v, { vol: 0.55, attack: 0.03, decay: 0.2, type: 'bandpass', freq: 2600 * p, freqTo: 7000, q: 3 });
+        for (const [f, decay, vol] of [[2900, 0.45, 0.12], [4130, 0.35, 0.08], [6020, 0.22, 0.05]] as const) {
+          tone(v, { at: 0.16, vol, attack: 0.003, decay, freq: f * p });
+        }
+        click(v, 0.16, 0.3, 3800);
+        break;
+      case 'pistol':
+        tone(v, { vol: 0.5, decay: 0.08, freq: 720 * p, freqTo: 620 });
+        noise(v, { vol: 0.35, decay: 0.04, type: 'bandpass', freq: 1500, q: 2 });
+        click(v, 0.09, 0.25, 2100);
+        click(v, 0.13, 0.2, 2500);
+        break;
+      case 'rifle':
+        noise(v, { vol: 0.4, attack: 0.03, decay: 0.12, type: 'bandpass', freq: 900, freqTo: 1500, q: 1.2 });
+        click(v, 0.1, 0.4, 1000);
+        twang(v, 0.14, 0.18, 196 * p, 0.12);
+        break;
+      case 'shotgun':
+        tone(v, { vol: 0.6, decay: 0.12, freq: 150 * p, freqTo: 85 });
+        noise(v, { vol: 0.5, decay: 0.07, freq: 700 });
+        click(v, 0.09, 0.45, 1100);
+        click(v, 0.17, 0.4, 800);
+        break;
+      case 'sniper':
+        tone(v, { vol: 0.55, decay: 0.14, freq: 130 * p, freqTo: 75 });
+        noise(v, { vol: 0.4, decay: 0.06, freq: 900 });
+        click(v, 0.1, 0.4, 1300);
+        tone(v, { at: 0.12, vol: 0.07, attack: 0.01, decay: 0.5, freq: 1760 });
+        tone(v, { at: 0.15, vol: 0.05, attack: 0.01, decay: 0.45, freq: 2637 });
+        break;
+      default:
+        noise(v, { vol: 0.35, attack: 0.03, decay: 0.1, type: 'bandpass', freq: 1200 * p, q: 0.8 });
+    }
   },
 
   /** A shot striking a player somewhere in the world. */
@@ -326,26 +379,78 @@ export const sfx = {
     noise(v, { vol: 0.4, decay: 0.1, freq: 500 });
   },
 
+  /** Hũ lửa: the clay jar shatters, the oil catches with a deep "phừng", then the flames roar and crackle. */
   boom(spot: Spot) {
-    const v = voice(spot, 0.9, 2, { important: spot.vol > 0.3 });
+    const v = voice(spot, 0.95, 2.4, { important: spot.vol > 0.3 });
     if (!v) return;
-    noise(v, { vol: 0.7, decay: 0.1, freq: 3200 });
-    noise(v, { vol: 1, attack: 0.005, decay: 0.9, freq: 1000, freqTo: 180 });
-    tone(v, { vol: 1, decay: 0.8, freq: 70, freqTo: 28 });
-    noise(v, { at: 0.04, vol: 0.45, attack: 0.08, decay: 1.7, freq: 280 });
-    for (let i = 0; i < 4; i++) {
-      noise(v, { at: 0.15 + Math.random() * 0.5, vol: 0.06, decay: 0.03, type: 'highpass', freq: 2500 + Math.random() * 2000 });
+    noise(v, { vol: 0.6, decay: 0.08, type: 'bandpass', freq: 2600, q: 1.2 });
+    for (let i = 0; i < 6; i++) {
+      noise(v, { at: Math.random() * 0.12, vol: 0.12 + Math.random() * 0.1, decay: 0.02, type: 'bandpass', freq: 2500 + Math.random() * 2800, q: 5 });
+    }
+    tone(v, { vol: 0.9, decay: 0.7, freq: 66, freqTo: 30 });
+    noise(v, { vol: 0.95, attack: 0.01, decay: 1, freq: 900, freqTo: 200 });
+    noise(v, { at: 0.02, vol: 0.7, attack: 0.08, decay: 0.32, freq: 220, freqTo: 1500 });
+    noise(v, { at: 0.08, vol: 0.4, attack: 0.15, decay: 1.8, type: 'bandpass', freq: 520, q: 0.8 });
+    for (let i = 0; i < 14; i++) {
+      noise(v, { at: 0.2 + Math.random() * 1.8, vol: 0.05 + Math.random() * 0.09, decay: 0.012 + Math.random() * 0.02, type: 'highpass', freq: 2000 + Math.random() * 3000 });
     }
   },
 
-  /** Arrows drawn from the quiver, nocked with a wooden tick and the string eased back. */
-  reload(spot: Spot) {
-    const v = voice(spot, 0.4, 0.8, { key: 'reload', gap: 150 });
+  /** Bầu khói: the dry gourd cracks open with a puff, then the smouldering herbs hiss ("xì") as the smoke pours out. */
+  smoke(spot: Spot) {
+    const v = voice(spot, 0.6, 2.9, { key: 'smoke', gap: 120, important: spot.vol > 0.4 });
     if (!v) return;
-    noise(v, { vol: 0.25, attack: 0.05, decay: 0.18, type: 'bandpass', freq: 1400, freqTo: 3200, q: 1.2 });
-    click(v, 0.3, 0.5, 1200);
-    tone(v, { at: 0.42, vol: 0.12, attack: 0.08, decay: 0.2, type: 'triangle', freq: 180, freqTo: 240 });
-    click(v, 0.62, 0.4, 900);
+    noise(v, { vol: 0.6, decay: 0.04, type: 'bandpass', freq: 1400, q: 1.5 });
+    tone(v, { vol: 0.35, decay: 0.06, freq: 300, freqTo: 140 });
+    noise(v, { at: 0.02, vol: 0.4, attack: 0.05, decay: 0.5, freq: 520 });
+    noise(v, { at: 0.04, vol: 0.55, attack: 0.08, decay: 2.5, type: 'highpass', freq: 3600, freqTo: 2400 });
+    noise(v, { at: 0.06, vol: 0.25, attack: 0.1, decay: 1.7, type: 'bandpass', freq: 6200, q: 1.5 });
+  },
+
+  /** Reloading, spread over the weapon's reload time so the last tick lands as it becomes ready. */
+  reload(weapon: WeaponId, spot: Spot) {
+    const len = Math.max(0.8, (WEAPONS[weapon]?.reloadMs ?? 0) / 1000);
+    const v = voice(spot, 0.55, len + 0.3, { key: 'reload', gap: 150 });
+    if (!v) return;
+    const end = len - 0.15;
+    switch (weapon) {
+      // ống thổi: a pouch of bamboo darts, a few slipped into the tube, a knock to seat them
+      case 'pistol':
+        noise(v, { vol: 0.3, attack: 0.04, decay: 0.16, type: 'bandpass', freq: 2200, freqTo: 3800, q: 1.4 });
+        for (const at of [0.35, 0.6, 0.85]) click(v, at, 0.35, 1800 * vary(0.1));
+        tone(v, { at: end, vol: 0.4, decay: 0.07, freq: 640, freqTo: 560 });
+        click(v, end, 0.3, 1500);
+        break;
+      // nỏ: the crank ratchets the prod back, a heavy latch, bolts laid in the groove, the lock clacks shut
+      case 'shotgun':
+        for (let i = 0; i < 10; i++) click(v, 0.3 + i * 0.075, 0.28, 900 + i * 45);
+        noise(v, { at: 1.15, vol: 0.5, decay: 0.07, type: 'bandpass', freq: 900, q: 1.2 });
+        tone(v, { at: 1.15, vol: 0.4, decay: 0.1, freq: 140, freqTo: 80 });
+        click(v, 1.6, 0.35, 1300);
+        click(v, 1.9, 0.35, 1200);
+        noise(v, { at: end, vol: 0.45, decay: 0.06, type: 'bandpass', freq: 1100, q: 1.5 });
+        tone(v, { at: end, vol: 0.35, decay: 0.08, freq: 170, freqTo: 100 });
+        break;
+      // thần tiễn: a long creaking draw, a bronze-tipped arrow touching the rest, and a shimmer once it is nocked
+      case 'sniper':
+        noise(v, { vol: 0.3, attack: 0.05, decay: 0.2, type: 'bandpass', freq: 1400, freqTo: 3200, q: 1.2 });
+        tone(v, { at: 0.5, vol: 0.12, attack: 0.25, decay: 0.5, type: 'triangle', freq: 95, freqTo: 120 });
+        tone(v, { at: 1, vol: 0.08, attack: 0.004, decay: 0.45, freq: 1760 });
+        click(v, 1.8, 0.45, 1100);
+        tone(v, { at: 2.2, vol: 0.12, attack: 0.1, decay: 0.3, type: 'triangle', freq: 150, freqTo: 210 });
+        click(v, end, 0.45, 900);
+        tone(v, { at: end, vol: 0.06, attack: 0.01, decay: 0.5, freq: 1318 });
+        tone(v, { at: end + 0.03, vol: 0.05, attack: 0.01, decay: 0.45, freq: 1760 });
+        break;
+      // cung tên: arrows rattle out of the quiver, one is nocked with a wooden tick and the string eased back
+      default:
+        noise(v, { vol: 0.3, attack: 0.05, decay: 0.18, type: 'bandpass', freq: 1400, freqTo: 3200, q: 1.2 });
+        for (const at of [0.3, 0.42, 0.55]) click(v, at, 0.3, 1300 * vary(0.15));
+        click(v, len * 0.6, 0.5, 1200);
+        tone(v, { at: len * 0.6 + 0.1, vol: 0.14, attack: 0.08, decay: 0.2, type: 'triangle', freq: 180, freqTo: 240 });
+        click(v, end, 0.45, 900);
+        twang(v, end + 0.04, 0.1, 196, 0.1);
+    }
   },
 
   pickup(item?: ItemId) {
@@ -432,11 +537,16 @@ export const sfx = {
     tone(v, { at: 0.28, vol: 0.5, attack: 0.03, decay: 0.5, freq: 880 });
   },
 
+  /** A wind-up rustle, the arm's swing, then the jar or gourd whirring away end over end. */
   throwItem(spot: Spot) {
-    const v = voice(spot, 0.3, 0.3, { key: 'throw', gap: 80 });
+    const v = voice(spot, 0.45, 0.6, { key: 'throw', gap: 80 });
     if (!v) return;
-    tone(v, { vol: 0.2, decay: 0.07, type: 'triangle', freq: 3100 });
-    noise(v, { at: 0.04, vol: 0.5, attack: 0.05, decay: 0.15, type: 'bandpass', freq: 600, freqTo: 1900, q: 1 });
+    const p = vary();
+    noise(v, { vol: 0.3, attack: 0.03, decay: 0.08, type: 'bandpass', freq: 1100 * p, q: 0.8 });
+    noise(v, { at: 0.06, vol: 0.65, attack: 0.06, decay: 0.16, type: 'bandpass', freq: 320 * p, freqTo: 1700, q: 1.1 });
+    for (const [at, vol, f] of [[0.2, 0.3, 1300], [0.29, 0.22, 1150], [0.38, 0.15, 1000], [0.47, 0.09, 900]] as const) {
+      noise(v, { at, vol, attack: 0.025, decay: 0.05, type: 'bandpass', freq: f * p, q: 1.6 });
+    }
   },
 
   step(surface: Surface) {
@@ -622,7 +732,32 @@ const HORN_AT = new Map(HORN.map((n) => [n[0] * 16 + n[1], n]));
 const STONE_CALM: [number, number][] = [[0, 0], [3, 7], [6, 12], [10, 7], [12, 12]];
 const STONE_TENSE: [number, number][] = [[0, 0], [2, 12], [4, 7], [6, 12], [8, 0], [10, 12], [12, 7], [14, 19]];
 
-let musicWanted = false;
+/** A looping piece: `play` schedules one sixteenth-note step at audio time `t`. */
+interface Track {
+  stepS: number;
+  steps: number;
+  /** Gain on the music bus; match themes sit above the menu theme so they carry over the fighting. */
+  level: number;
+  echoSteps: number;
+  firstRoot: number;
+  droneCutoff: number;
+  /** Match themes get a held string pad whose dissonant notes grow with the tension. */
+  pad: boolean;
+  reset(): void;
+  play(step: number, t: number): void;
+}
+
+/** How tense the match is: 0 exploring, 1 fighting nearby or the zone closing in, 2 the final moments. */
+export type MusicTension = 0 | 1 | 2;
+
+let menuWanted = false;
+let tensionWanted: MusicTension = 0;
+/** Extra loudness on top of the track's level, raised with the tension. */
+let musicBoost = 1;
+/** Pad oscillators with their interval above the bar's root. */
+let padVoices: { osc: OscillatorNode; gain: GainNode; interval: number }[] = [];
+let matchMap: MapId | null = null;
+let musicTrack: Track | null = null;
 let musicOut: GainNode | null = null;
 let musicMix: GainNode | null = null;
 let musicSources: AudioScheduledSourceNode[] = [];
@@ -636,30 +771,63 @@ let musicHidden = false;
 let fluteEndStep = -1;
 let fluteMidi = 0;
 
+const MENU_TRACK: Track = {
+  stepS: STEP_S,
+  steps: LOOP_STEPS,
+  level: 1,
+  echoSteps: 3,
+  firstRoot: CHORD_ROOTS[0],
+  droneCutoff: 380,
+  pad: false,
+  reset: () => {
+    fluteEndStep = -1;
+  },
+  play: (step, t) => playMenuStep(step, t),
+};
+
 /** Plays the theme on menu screens; it waits for the first user gesture before making any sound. */
 export function setMenuMusic(on: boolean) {
-  musicWanted = on;
+  menuWanted = on;
   syncMusic();
 }
 
-function syncMusic() {
-  const on = musicWanted && settings.music && settings.volume > 0 && !!ctx;
-  if (on && !musicOut) buildMusic();
-  else if (!on && musicOut) teardownMusic();
+/** In a match: the map's own theme, which takes over from the menu theme; `null` when the match ends. */
+export function setMatchMusic(map: MapId | null) {
+  matchMap = map;
+  if (!map) tensionWanted = 0;
+  syncMusic();
 }
 
-function buildMusic() {
+/** The match theme follows the fight; a change is picked up at the start of the next bar. */
+export function setMusicTension(level: MusicTension) {
+  tensionWanted = level;
+}
+
+function wantedTrack(): Track | null {
+  if (!settings.music || settings.volume <= 0 || !ctx) return null;
+  if (matchMap) return themeTrack(matchMap);
+  return menuWanted ? MENU_TRACK : null;
+}
+
+function syncMusic() {
+  const want = wantedTrack();
+  if (want === musicTrack) return;
+  if (musicTrack) teardownMusic();
+  if (want) buildMusic(want);
+}
+
+function buildMusic(track: Track) {
   const c = ctx!;
   const out = c.createGain();
   out.gain.value = 0;
-  out.gain.setTargetAtTime(1, c.currentTime, 1.5);
+  out.gain.setTargetAtTime(track.level, c.currentTime, 1.5);
   out.connect(musicBus);
 
   // a dotted-eighth echo gives the flute and stone the feel of an open valley
   const mix = c.createGain();
   mix.connect(out);
   const echo = c.createDelay(1);
-  echo.delayTime.value = STEP_S * 3;
+  echo.delayTime.value = Math.min(0.95, track.stepS * track.echoSteps);
   const echoTone = c.createBiquadFilter();
   echoTone.type = 'lowpass';
   echoTone.frequency.value = 2200;
@@ -672,7 +840,7 @@ function buildMusic() {
 
   const filter = c.createBiquadFilter();
   filter.type = 'lowpass';
-  filter.frequency.value = 380;
+  filter.frequency.value = track.droneCutoff;
   filter.Q.value = 2;
   const droneGain = c.createGain();
   droneGain.gain.value = 0.05;
@@ -681,7 +849,7 @@ function buildMusic() {
   for (const [interval, detune] of [[0, -5], [0, 6], [7, 0]]) {
     const osc = c.createOscillator();
     osc.type = 'sawtooth';
-    osc.frequency.value = hz(CHORD_ROOTS[0] - 12 + interval);
+    osc.frequency.value = hz(track.firstRoot - 12 + interval);
     osc.detune.value = detune;
     osc.connect(filter);
     osc.start();
@@ -696,36 +864,72 @@ function buildMusic() {
   lfo.start();
   musicSources.push(lfo);
 
+  padVoices = [];
+  if (track.pad) {
+    // bowed-string pad breathing slowly in and out; its gains are set every bar from the tension
+    const padTone = c.createBiquadFilter();
+    padTone.type = 'lowpass';
+    padTone.frequency.value = 1100;
+    const breath = c.createGain();
+    const breathLfo = c.createOscillator();
+    breathLfo.frequency.value = 0.18;
+    const breathAmt = c.createGain();
+    breathAmt.gain.value = 0.35;
+    breathLfo.connect(breathAmt).connect(breath.gain);
+    breathLfo.start();
+    musicSources.push(breathLfo);
+    padTone.connect(breath).connect(mix);
+    for (const interval of PAD_INTERVALS) {
+      const osc = c.createOscillator();
+      osc.type = 'sawtooth';
+      osc.detune.value = interval === 0 ? -4 : 4;
+      osc.frequency.value = hz(track.firstRoot + 12 + interval);
+      const gain = c.createGain();
+      gain.gain.value = 0;
+      osc.connect(gain).connect(padTone);
+      osc.start();
+      musicSources.push(osc);
+      padVoices.push({ osc, gain, interval });
+    }
+  }
+
+  musicTrack = track;
+  musicBoost = 1;
   musicOut = out;
   musicMix = mix;
   droneFilter = filter;
   musicStep = 0;
   musicNext = c.currentTime + 0.1;
   musicHidden = false;
-  fluteEndStep = -1;
+  track.reset();
   scheduleMusic();
   musicTimer = window.setInterval(scheduleMusic, 60);
 }
 
 function scheduleMusic() {
   const c = ctx;
-  if (!c || !musicOut) return;
+  const track = musicTrack;
+  if (!c || !musicOut || !track) return;
   // background tabs throttle timers, so mute instead of letting the scheduler fall behind
   const hidden = document.visibilityState === 'hidden';
   if (hidden !== musicHidden) {
     musicHidden = hidden;
-    musicOut.gain.setTargetAtTime(hidden ? 0 : 1, c.currentTime, 0.3);
+    musicOut.gain.setTargetAtTime(hidden ? 0 : track.level * musicBoost, c.currentTime, 0.3);
   }
   if (hidden) return;
   if (musicNext < c.currentTime) musicNext = c.currentTime + 0.05;
   while (musicNext < c.currentTime + LOOKAHEAD_S) {
-    playMusicStep(musicStep, musicNext);
-    musicNext += STEP_S;
-    musicStep = (musicStep + 1) % LOOP_STEPS;
+    track.play(musicStep, musicNext);
+    musicNext += track.stepS;
+    musicStep = (musicStep + 1) % track.steps;
   }
 }
 
-function playMusicStep(step: number, t: number) {
+function retuneDrone(root: number, t: number) {
+  for (const [osc, interval] of droneOscs) osc.frequency.setTargetAtTime(hz(root - 12 + interval), t, 0.06);
+}
+
+function playMenuStep(step: number, t: number) {
   const bar = Math.floor(step / 16);
   const s = step % 16;
   const tense = bar >= TENSE_FROM_BAR;
@@ -734,7 +938,7 @@ function playMusicStep(step: number, t: number) {
   if (s === 0) {
     if (bar === 0 || bar === TENSE_FROM_BAR || bar === 12) gong(t, bar === 0 ? 0.22 : 0.28);
     if (bar === 0 || bar === TENSE_FROM_BAR) droneFilter?.frequency.setTargetAtTime(tense ? 760 : 420, t, 2);
-    for (const [osc, interval] of droneOscs) osc.frequency.setTargetAtTime(hz(root - 12 + interval), t, 0.06);
+    retuneDrone(root, t);
     chant(t, root, 16 * STEP_S, tense ? 0.07 : 0.05);
   }
 
@@ -869,9 +1073,9 @@ function handDrum(t: number, vol: number) {
 }
 
 /** Cồng chiêng: slightly detuned partials beat against each other as the gong rings out. */
-function gong(t: number, vol: number) {
+function gong(t: number, vol: number, midi = D3) {
   const v = musicVoice(t);
-  const base = hz(D3);
+  const base = hz(midi);
   for (const [ratio, decay, level] of [[1, 4.5, 1], [1.007, 4.5, 0.8], [2.02, 3, 0.4], [2.98, 2.2, 0.25], [4.13, 1.5, 0.12]]) {
     tone(v, { vol: vol * level, attack: 0.01, decay, freq: base * ratio });
   }
@@ -926,10 +1130,12 @@ function teardownMusic() {
   clearInterval(musicTimer);
   const out = musicOut;
   const sources = musicSources;
+  musicTrack = null;
   musicOut = null;
   musicMix = null;
   droneFilter = null;
   droneOscs = [];
+  padVoices = [];
   musicSources = [];
   if (!out || !ctx) return;
   out.gain.setTargetAtTime(0, ctx.currentTime, 0.4);
@@ -943,4 +1149,415 @@ function teardownMusic() {
     }
     out.disconnect();
   }, 2500);
+}
+
+/** Mõ: a hollow wooden knock. */
+function woodblock(t: number, vol: number) {
+  const v = musicVoice(t);
+  tone(v, { vol, decay: 0.05, freq: 880, freqTo: 820 });
+  noise(v, { vol: vol * 0.5, decay: 0.012, type: 'bandpass', freq: 2400, q: 3 });
+}
+
+/** Sênh tiền: coins strung on wooden clappers, a short metallic shimmer. */
+function shaker(t: number, vol: number) {
+  const v = musicVoice(t);
+  noise(v, { vol, attack: 0.004, decay: 0.045, type: 'highpass', freq: 6500 });
+  noise(v, { vol: vol * 0.5, decay: 0.03, type: 'bandpass', freq: 9000, q: 4 });
+}
+
+/** Đàn tranh: a plucked zither string, bright at first and quickly mellowing. */
+function pluck(t: number, midi: number, vol: number) {
+  const v = musicVoice(t);
+  const f = hz(midi);
+  tone(v, { vol, decay: 0.6, type: 'triangle', freq: f });
+  tone(v, { vol: vol * 0.4, decay: 0.25, freq: f * 2 });
+  tone(v, { vol: vol * 0.15, decay: 0.12, freq: f * 3 });
+  noise(v, { vol: vol * 0.35, decay: 0.012, type: 'bandpass', freq: f * 4, q: 2 });
+}
+
+let monochordWave: PeriodicWave | null = null;
+
+/** Đàn bầu: the monochord's pure harmonic tone, bent up into each note and swaying with a wide vibrato. */
+function monochord(t: number, midi: number, dur: number, slideFrom: number | null, vol: number) {
+  const c = ctx!;
+  const f = hz(midi);
+  monochordWave ??= c.createPeriodicWave(new Float32Array([0, 0, 0, 0]), new Float32Array([0, 1, 0.35, 0.12]));
+  const osc = c.createOscillator();
+  osc.setPeriodicWave(monochordWave);
+  osc.frequency.setValueAtTime(slideFrom === null ? hz(midi - 2) : hz(slideFrom), t);
+  osc.frequency.exponentialRampToValueAtTime(f, t + 0.12);
+
+  const vib = c.createOscillator();
+  vib.frequency.value = 5;
+  const vibAmt = c.createGain();
+  vibAmt.gain.setValueAtTime(0, t);
+  vibAmt.gain.linearRampToValueAtTime(f * 0.018, t + Math.min(dur, 0.45));
+  vib.connect(vibAmt).connect(osc.frequency);
+
+  const g = c.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(vol, t + 0.012);
+  g.gain.exponentialRampToValueAtTime(vol * 0.4, t + Math.max(0.05, dur));
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.3);
+  osc.connect(g).connect(musicMix!);
+
+  const end = t + dur + 0.35;
+  osc.start(t);
+  vib.start(t);
+  osc.stop(end);
+  vib.stop(end);
+}
+
+// ------------------------------------------------------------------ match themes
+
+// Each map has its own 16-bar theme. Unlike the heroic menu march (chant, open fifths), match themes are dark and
+// suspenseful, and follow the fight (`setMusicTension`, applied at the next bar):
+//   0 exploring: the calm rhythm, the melody a little softer, a low string pad with a faint minor sixth.
+//   1 fighting nearby or the zone closing: the driving rhythm, a clock-like tick, a noise riser every 4 bars.
+//   2 the final moments: a racing heartbeat, a bass rocking root to minor second, a trembling đàn tranh,
+//     the pad's semitone cluster and a gong-and-drum stinger on the way in.
+// Rhythms are written one character per sixteenth note ('.' = rest; drums take a loudness 1-9; bass, đàn tranh and
+// đàn đá take an interval over the bar's root: 0 or x root, m minor second, 5 fifth, 8 or o octave, a twelfth,
+// b two octaves), melodies as "note:sixteenths" with "|" between bars, so every part stays on the chord of its bar.
+
+type LineVoice = 'flute' | 'horn' | 'monochord' | 'pluck';
+
+interface Line {
+  voice: LineVoice;
+  vol: number;
+  notes: Phrase;
+}
+
+interface Section {
+  drum?: string;
+  hand?: string;
+  wood?: string;
+  shaker?: string;
+  bass?: string;
+  pluck?: string;
+  stone?: string;
+}
+
+interface Theme {
+  bpm: number;
+  roots: string;
+  /** Rhythm while exploring (tension 0) and while fighting (tension 1 and 2). */
+  calm: Section;
+  tense: Section;
+  lines: Line[];
+  gongBars: number[];
+  gong: string;
+  /** Drone brightness (lowpass cutoff) while exploring and while fighting. */
+  drone: [number, number];
+  level: number;
+}
+
+/** Pad notes over the bar's root: root, fifth, minor sixth and minor second, the last two rising with the tension. */
+const PAD_INTERVALS = [0, 7, 8, 1];
+const PAD_LEVELS: Record<MusicTension, number[]> = {
+  0: [0.022, 0.016, 0.006, 0],
+  1: [0.026, 0.02, 0.016, 0.004],
+  2: [0.03, 0.022, 0.02, 0.016],
+};
+/** Tension 2 bass: root, root, root, minor second, rocking like a held breath. */
+const DREAD_BASS = 'x.x.x.m.x.x.x.m.';
+
+function setPad(root: number, tension: MusicTension, t: number) {
+  padVoices.forEach(({ osc, gain, interval }, i) => {
+    osc.frequency.setTargetAtTime(hz(root + 12 + interval), t, 0.08);
+    gain.gain.setTargetAtTime(PAD_LEVELS[tension][i], t, 0.8);
+  });
+}
+
+/** Two low thumps, "lub-dub". */
+function heartbeat(t: number, vol: number) {
+  const v = musicVoice(t);
+  tone(v, { vol, decay: 0.16, freq: 64, freqTo: 40 });
+  tone(v, { at: 0.17, vol: vol * 0.7, decay: 0.2, freq: 58, freqTo: 36 });
+}
+
+/** A dry clock tick. */
+function tick(t: number, vol: number) {
+  const v = musicVoice(t);
+  tone(v, { vol, decay: 0.02, type: 'triangle', freq: 1900 });
+  noise(v, { vol: vol * 0.6, decay: 0.01, type: 'bandpass', freq: 3600, q: 4 });
+}
+
+/** Rushing air that swells through a bar and cuts off at the next downbeat. */
+function riser(t: number, dur: number, vol: number) {
+  const v = musicVoice(t);
+  noise(v, { vol, attack: dur, decay: 0.06, type: 'bandpass', freq: 300, freqTo: 4000, q: 1.4 });
+  tone(v, { vol: vol * 0.25, attack: dur, decay: 0.06, freq: 220, freqTo: 880 });
+}
+
+/** Entering the final moments: a gong an octave under the bar's root over a heavy drum hit. */
+function stinger(t: number, root: number) {
+  bronzeDrum(t, 0.95);
+  gong(t, 0.34, root - 12);
+  noise(musicVoice(t), { vol: 0.35, attack: 0.01, decay: 0.9, freq: 600, freqTo: 120 });
+}
+
+const NOTE_BASE: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+
+function midiOf(name: string): number {
+  const m = /^([A-G])([#b]?)(\d)$/.exec(name);
+  if (!m) throw new Error(`audio: bad note "${name}"`);
+  return 12 * (Number(m[3]) + 1) + NOTE_BASE[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0);
+}
+
+function mel(firstBar: number, text: string): Phrase {
+  const out: Phrase = [];
+  text.split('|').forEach((bar, i) => {
+    let step = 0;
+    for (const token of bar.trim().split(/\s+/).filter(Boolean)) {
+      const [name, len = '4'] = token.split(':');
+      if (name !== '-') out.push([firstBar + i, step, midiOf(name), Number(len)]);
+      step += Number(len);
+    }
+  });
+  return out;
+}
+
+const shift = (phrase: Phrase, semitones: number): Phrase => phrase.map(([bar, step, midi, len]) => [bar, step, midi + semitones, len]);
+
+const INTERVAL: Record<string, number> = { x: 0, '0': 0, m: 1, '5': 7, '8': 12, o: 12, a: 19, b: 24 };
+const level = (pattern: string | undefined, s: number) => Number(pattern?.[s]) / 9 || 0;
+const interval = (pattern: string | undefined, s: number): number | null => INTERVAL[pattern?.[s] ?? '.'] ?? null;
+
+function playLine(voice: LineVoice, t: number, midi: number, dur: number, slideFrom: number | null, vol: number) {
+  if (voice === 'flute') flute(t, midi, dur, slideFrom, vol);
+  else if (voice === 'horn') horn(t, midi, dur, vol);
+  else if (voice === 'monochord') monochord(t, midi, dur, slideFrom, vol);
+  else pluck(t, midi, vol);
+}
+
+function buildTheme(def: Theme): Track {
+  const roots = def.roots.trim().split(/\s+/).map(midiOf);
+  const stepS = 60 / def.bpm / 4;
+  const steps = roots.length * 16;
+  const gongMidi = midiOf(def.gong);
+  const lines = def.lines.map((l) => ({ ...l, at: new Map(l.notes.map((n) => [n[0] * 16 + n[1], n])), endStep: -1, lastMidi: 0 }));
+  let tension: MusicTension = 0;
+  return {
+    stepS,
+    steps,
+    level: def.level,
+    echoSteps: 3,
+    firstRoot: roots[0],
+    droneCutoff: def.drone[0],
+    pad: true,
+    reset() {
+      for (const l of lines) l.endStep = -1;
+      tension = tensionWanted;
+    },
+    play(step, t) {
+      const bar = Math.floor(step / 16);
+      const s = step % 16;
+      const root = roots[bar];
+      if (s === 0) {
+        const before = tension;
+        tension = tensionWanted;
+        if (tension !== before || step === 0) {
+          droneFilter?.frequency.setTargetAtTime(def.drone[tension > 0 ? 1 : 0] + (tension === 2 ? 250 : 0), t, 1.5);
+          musicBoost = 1 + 0.12 * tension;
+          musicOut?.gain.setTargetAtTime(def.level * musicBoost, t, 1.2);
+        }
+        if (tension === 2 && before < 2) stinger(t, root);
+        else if (def.gongBars.includes(bar)) gong(t, bar === 0 ? 0.22 : 0.28, gongMidi);
+        retuneDrone(root, t);
+        setPad(root, tension, t);
+        if (tension > 0 && bar % 4 === 3) riser(t, 16 * stepS, tension === 2 ? 0.1 : 0.06);
+      }
+      const sec = tension > 0 ? def.tense : def.calm;
+      if (bar === roots.length - 1 && s >= 8) {
+        handDrum(t, 0.09 + (s - 8) * 0.03);
+        if (s === 8 || s === 12 || s === 15) bronzeDrum(t, 0.55);
+      } else {
+        if (level(sec.drum, s)) bronzeDrum(t, level(sec.drum, s) * 0.85);
+        if (level(sec.hand, s)) handDrum(t, level(sec.hand, s) * 0.4);
+      }
+      if (level(sec.wood, s)) woodblock(t, level(sec.wood, s) * 0.3);
+      if (level(sec.shaker, s)) shaker(t, level(sec.shaker, s) * 0.22);
+      if (tension === 1 && s % 4 === 2) tick(t, 0.1);
+      if (tension === 2) {
+        if (s % 2 === 0) tick(t, s % 4 === 0 ? 0.13 : 0.08);
+        if (s % 4 === 0) heartbeat(t, 0.45);
+        // the đàn tranh trembles on a high root, slipping up a semitone at the end of each bar
+        pluck(t, root + 24 + (s >= 12 ? 1 : 0), 0.03);
+      }
+      const b = interval(tension === 2 ? DREAD_BASS : sec.bass, s);
+      if (b !== null) bass(t, root - 12 + b, b === 0 ? 0.22 : 0.17);
+      const p = tension === 2 ? null : interval(sec.pluck, s);
+      if (p !== null) pluck(t, root + 12 + p, tension > 0 ? 0.07 : 0.085);
+      const st = interval(sec.stone, s);
+      if (st !== null) stone(t, root + 12 + st, 0.09);
+      for (const l of lines) {
+        const note = l.at.get(step);
+        if (!note) continue;
+        const [, , midi, len] = note;
+        playLine(l.voice, t, midi, len * stepS, l.endStep === step ? l.lastMidi : null, l.vol * (tension === 0 ? 0.8 : 1));
+        l.endStep = (step + len) % steps;
+        l.lastMidi = midi;
+      }
+    },
+  };
+}
+
+const THEMES: Record<MapId, () => Theme> = {
+  // Nước Văn Lang: a war brewing over the whole realm, in C minor (far from the menu's D) with low horn calls
+  // that lean on the minor second, a 3-3-2 drum gallop and a flute that ends each half on the dominant
+  vanlang: () => ({
+    bpm: 104,
+    roots: 'C3 C3 Ab2 Ab2 C3 C3 G2 G2 Eb3 Eb3 F3 G2 Ab2 Ab2 F2 G2',
+    calm: { drum: '8.....5...8.....', hand: '..2...3...2...3.', bass: 'x..x....x..x....', pluck: '0...5.8.0...5.8a' },
+    tense: { drum: '9..6..6.9..6.36.', hand: '3.23.23.3.23.232', shaker: '.2.2.2.2.2.2.2.2', bass: 'x.ox.ox.x.ox.oxo', pluck: '058a058a058a8a58' },
+    lines: [
+      { voice: 'horn', vol: 0.075, notes: [...mel(0, 'C4:8 G3:4 Bb3:4'), ...mel(4, 'C4:6 Eb4:2 C4:8'), ...mel(8, 'Eb4:4 Eb4:2 E4:2 Eb4:8'), ...mel(12, 'C4:4 C4:2 Db4:2 C4:8')] },
+      {
+        voice: 'flute',
+        vol: 0.1,
+        notes: [
+          ...mel(1, 'G4:6 Bb4:2 C5:8 | Eb5:4 C5:4 Ab4:8 | C5:6 Bb4:2 Ab4:4 F4:4'),
+          ...mel(5, 'Eb5:4 F5:4 G5:8 | F5:4 Eb5:4 D5:8 | G4:16'),
+          ...mel(9, 'G5:4 Ab5:4 G5:4 Eb5:4 | F5:6 Eb5:2 C5:8 | D5:8 F5:4 G5:4'),
+          ...mel(13, 'C6:4 Bb5:4 Ab5:4 G5:4 | F5:4 Ab5:4 C6:8 | B4:8 D5:4 G5:4'),
+        ],
+      },
+      { voice: 'monochord', vol: 0.07, notes: [...mel(9, 'Eb4:16 | C4:16 | B3:16'), ...mel(13, 'Eb4:16 | C4:16 | D4:16')] },
+    ],
+    gongBars: [0, 8],
+    gong: 'C3',
+    drone: [380, 780],
+    level: 1.4,
+  }),
+  // Thành Cổ Loa: the spiral citadel of the magic crossbow, tense and quick, đàn tranh ticking like a ratchet
+  coloa: () => ({
+    bpm: 124,
+    roots: 'E3 E3 D3 D3 E3 E3 G3 B2 E3 G3 A3 B2 E3 D3 G3 B2',
+    calm: { drum: '9.....6.9.......', hand: '..2...2...2...2.', wood: '....4.......4...', bass: 'x..x..x.x..x..x.', pluck: '0.8.5.8.0.8.5.8.' },
+    tense: { drum: '9..69..69..69.6.', hand: '3.2.3.223.2.3.22', shaker: '.3.3.3.3.3.3.3.3', bass: 'x.xxx.xxx.xxx.xo', pluck: '08580858085808a8' },
+    lines: [
+      { voice: 'horn', vol: 0.07, notes: [...mel(0, 'E4:3 E4:3 G4:2 B4:8'), ...mel(4, 'E4:3 E4:3 D4:2 B3:8'), ...mel(8, 'E4:2 E4:2 E4:2 G4:2 B4:8'), ...mel(12, 'E4:2 E4:2 E4:2 G4:2 D5:8')] },
+      {
+        voice: 'flute',
+        vol: 0.1,
+        notes: [
+          ...mel(1, 'E5:2 E5:2 G5:2 E5:2 B5:4 A5:4 | G5:4 E5:4 D5:8 | B4:2 D5:2 E5:4 D5:4 B4:4'),
+          ...mel(5, 'E5:2 G5:2 A5:4 B5:4 D6:4 | B5:4 A5:4 G5:4 E5:4 | B4:12 D5:4'),
+          ...mel(9, 'E6:2 D6:2 B5:4 A5:2 B5:2 G5:4 | A5:4 B5:4 D6:4 B5:4 | A5:8 G5:4 E5:4'),
+          ...mel(13, 'E5:2 G5:2 B5:2 E6:2 D6:4 B5:4 | D6:4 B5:4 A5:4 G5:4 | B5:8 -:8'),
+        ],
+      },
+    ],
+    gongBars: [0, 8],
+    gong: 'E3',
+    drone: [480, 900],
+    level: 1.35,
+  }),
+  // Núi Nghĩa Lĩnh: the sacred mountain of the Hùng temple, slow and misty, đàn bầu and gongs over a deep pulse
+  nghialinh: () => ({
+    bpm: 80,
+    roots: 'A2 A2 D3 D3 C3 C3 E3 E3 A2 C3 D3 E3 A2 G2 E3 E3',
+    calm: { drum: '7...............', hand: '........3.......', bass: 'x...............', stone: '0...8...5...a...' },
+    tense: { drum: '8.......6...5...', hand: '..2...3...2...3.', bass: 'x.......x...x...', stone: '0.8.5.8.0.8.a.8.' },
+    lines: [
+      {
+        voice: 'monochord',
+        vol: 0.11,
+        notes: mel(0, 'A4:8 C5:4 D5:4 | E5:12 D5:4 | D5:8 C5:4 A4:4 | A4:16 | C5:6 D5:2 E5:8 | G5:8 E5:4 D5:4 | E5:16 | -:8 D5:4 C5:4'),
+      },
+      { voice: 'horn', vol: 0.05, notes: [...mel(0, 'A3:12 -:4'), ...mel(4, 'G3:12 -:4')] },
+      {
+        voice: 'flute',
+        vol: 0.09,
+        notes: mel(8, 'A5:4 G5:4 E5:4 D5:4 | E5:8 G5:8 | A5:6 G5:2 E5:4 D5:4 | E5:16 | C6:4 A5:4 G5:4 E5:4 | D5:8 E5:4 G5:4 | A5:16 | G5:8 E5:8'),
+      },
+      { voice: 'monochord', vol: 0.07, notes: mel(8, 'E4:16 | G4:16 | A4:16 | B4:16 | E4:16 | D4:16 | E4:16 | B3:16') },
+    ],
+    gongBars: [0, 4, 8, 12],
+    gong: 'A2',
+    drone: [320, 600],
+    level: 1.3,
+  }),
+  // Làng Lạc Việt: a village festival, dancing flute and đàn tranh over mõ, sênh tiền and hand drums
+  lacviet: () => ({
+    bpm: 112,
+    roots: 'G3 G3 D3 E3 G3 C3 D3 D3 E3 E3 C3 D3 G3 C3 D3 G3',
+    calm: { drum: '7.......5.......', hand: '...2..3....2.3..', wood: '..3...3...3...3.', bass: 'x...o...x...o...', pluck: '0.5.8.5.a.8.5.8.' },
+    tense: { drum: '8...6...8...6.5.', hand: '.2.3.2.3.2.3.233', wood: '3.3.3.3.3.3.3.3.', shaker: '2222222222222222', bass: 'x.o.x.o.x.o.x.oo', pluck: '058a058a058a8a58' },
+    lines: [
+      {
+        voice: 'flute',
+        vol: 0.1,
+        notes: [
+          ...mel(0, 'D5:2 E5:2 G5:4 E5:2 D5:2 B4:4 | A4:2 B4:2 D5:4 B4:4 A4:4 | D5:4 A4:2 B4:2 D5:4 E5:4 | B4:8 A4:4 G4:4'),
+          ...mel(4, 'G5:2 E5:2 D5:4 E5:2 G5:2 A5:4 | G5:4 E5:4 D5:4 B4:4 | A4:4 B4:2 D5:2 E5:4 D5:4 | D5:12 -:4'),
+          ...mel(8, 'E5:2 G5:2 A5:2 B5:2 A5:4 G5:4 | E5:4 D5:2 E5:2 G5:8 | E5:2 D5:2 B4:4 D5:2 E5:2 G5:4 | A5:8 B5:4 A5:4'),
+          ...mel(12, 'D6:2 B5:2 A5:4 G5:2 E5:2 D5:4 | E5:4 G5:4 E5:4 D5:4 | B4:2 D5:2 E5:4 A5:4 B5:4 | G5:8 -:8'),
+        ],
+      },
+      { voice: 'monochord', vol: 0.065, notes: mel(8, 'G4:8 B4:8 | E4:8 G4:8 | C4:8 E4:8 | D4:8 A4:8 | G4:8 B4:8 | E4:8 G4:8 | D4:8 A4:8 | G4:16') },
+    ],
+    gongBars: [0, 8],
+    gong: 'G2',
+    drone: [520, 760],
+    level: 1.3,
+  }),
+  // Kinh Đô Phong Châu: the royal capital, a stately court fanfare with đàn đá, bronze drums and gongs
+  phongchau: () => {
+    const flute = mel(8, 'F5:4 A5:4 C6:6 A5:2 | D6:4 C6:4 A5:8 | G5:2 A5:2 C6:4 D6:4 C6:4 | C6:12 A5:4 | A5:4 C6:4 D6:4 F6:4 | D6:4 C6:4 A5:4 G5:4 | A5:4 G5:4 F5:4 G5:4 | C6:8 -:8');
+    return {
+      bpm: 92,
+      roots: 'F3 F3 C3 C3 D3 D3 C3 C3 F3 D3 G3 C3 F3 D3 C3 C3',
+      calm: { drum: '9.......6...6...', hand: '....3.......3...', bass: 'x.......x.......', stone: '0...5...8...5...' },
+      tense: { drum: '9...7...9..57...', hand: '2.3.2.3.2.3.2.33', bass: 'x...x.o.x...x.o.', stone: '0.5.8.5.a.8.5.8.' },
+      lines: [
+        {
+          voice: 'horn',
+          vol: 0.08,
+          notes: mel(0, 'F4:4 A4:4 C5:8 | D5:4 C5:4 A4:8 | G4:4 A4:4 C5:4 G4:4 | C5:16 | D5:4 C5:4 A4:4 G4:4 | A4:6 G4:2 F4:8 | G4:4 A4:4 C5:4 D5:4 | C5:16'),
+        },
+        { voice: 'flute', vol: 0.1, notes: flute },
+        { voice: 'horn', vol: 0.055, notes: shift(flute, -12) },
+      ],
+      gongBars: [0, 4, 8, 12],
+      gong: 'F2',
+      drone: [420, 760],
+      level: 1.35,
+    };
+  },
+  // Trường Tập Bắn: a light, steady groove to aim to, đàn tranh first and the flute after
+  truongban: () => ({
+    bpm: 100,
+    roots: 'C3 C3 A2 A2 G2 G2 C3 C3 C3 C3 A2 A2 D3 D3 G2 G2',
+    calm: { drum: '6.......4.......', hand: '....2.......2...', wood: '..2...2...2...2.', bass: 'x.......o.......' },
+    tense: { drum: '7...5...7...5...', hand: '..2...2...2...22', shaker: '.2.2.2.2.2.2.2.2', bass: 'x...o...x...o...', stone: '0...8...5...8...' },
+    lines: [
+      {
+        voice: 'pluck',
+        vol: 0.1,
+        notes: mel(0, 'C5:2 E5:2 G5:4 E5:4 D5:4 | C5:8 -:8 | A4:2 C5:2 E5:4 D5:4 C5:4 | A4:8 -:8 | G4:2 A4:2 C5:4 D5:4 E5:4 | D5:8 -:8 | E5:2 G5:2 A5:4 G5:4 E5:4 | C5:8 -:8'),
+      },
+      {
+        voice: 'flute',
+        vol: 0.085,
+        notes: mel(8, 'G5:4 E5:4 D5:4 C5:4 | D5:8 E5:8 | A5:4 G5:4 E5:4 D5:4 | E5:16 | D5:4 E5:4 G5:4 A5:4 | G5:8 E5:8 | D5:4 E5:2 D5:2 C5:4 A4:4 | G4:8 -:8'),
+      },
+    ],
+    gongBars: [0],
+    gong: 'C3',
+    drone: [380, 560],
+    level: 1.2,
+  }),
+};
+
+const themeCache = new Map<MapId, Track>();
+
+function themeTrack(map: MapId): Track {
+  let track = themeCache.get(map);
+  if (!track) {
+    track = buildTheme(THEMES[map]());
+    themeCache.set(map, track);
+  }
+  return track;
 }

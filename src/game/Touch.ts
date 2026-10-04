@@ -41,6 +41,7 @@ const MODE_BUTTONS: Record<TouchMode, ReadonlySet<TouchButton> | null> = {
 };
 
 const BUTTON_NAMES: Record<TouchButton, string> = {
+  fire: 'Bắn',
   heal: 'Hồi máu',
   reload: 'Nạp đạn',
   interact: 'Nhặt',
@@ -61,12 +62,22 @@ interface Editing {
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi));
 
-/** On-screen joysticks: left moves, right aims and fires (release throws grenades). */
+/** Throw distance (share of the maximum) when the fire button is let go without the aim stick held. */
+const DEFAULT_THROW = 0.6;
+
+const FIRE_ICON = (px: number) => `<svg width="${px}" height="${px}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+  <circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><path d="M12 1.5v4M12 18.5v4M1.5 12h4M18.5 12h4"/></svg>`;
+
+/**
+ * Left stick moves, right stick only turns the player; the fire button (on the left, by default above the movement
+ * stick) shoots while held, and with a fire jar or smoke gourd in hand throws when let go.
+ */
 export class TouchControls {
   move = { x: 0, y: 0 };
   aim = { x: 0, y: 0, active: false };
   private releasePulse = false;
-  private lastAimMagnitude = 0;
+  private firePointer: number | null = null;
+  private throwPower = DEFAULT_THROW;
   private readonly left: Stick;
   private readonly right: Stick;
   private readonly radius: number;
@@ -101,8 +112,10 @@ export class TouchControls {
     this.size = size;
     document.body.style.setProperty('--tb', `${size}px`);
     document.body.style.setProperty('--tb-big', `${Math.round(size * 1.3)}px`);
+    document.body.style.setProperty('--tb-fire', `${this.baseSize('fire')}px`);
     const ic = (id: IconId) => iconSvg(id, Math.round(size * 0.62));
     const defs: [TouchButton, string][] = [
+      ['fire', FIRE_ICON(Math.round(this.baseSize('fire') * 0.56))],
       ['heal', ic('medkit')],
       ['reload', '<small>R</small>'],
       ['interact', '<small>NHẶT</small>'],
@@ -122,14 +135,19 @@ export class TouchControls {
         e.preventDefault();
         e.stopPropagation();
         if (this.editing) this.beginDrag(id, btn, e);
-        else if (this.allows(id)) onButton(id);
+        else if (this.allows(id)) {
+          if (id === 'fire') this.pressFire(btn, e);
+          onButton(id);
+        }
       });
       btn.addEventListener('pointermove', (e) => this.moveDrag(id, btn, e));
       const endDrag = (e: PointerEvent) => {
         if (this.editing?.drag?.pointerId === e.pointerId) this.editing.drag = null;
+        if (id === 'fire') this.releaseFire(e);
       };
       btn.addEventListener('pointerup', endDrag);
       btn.addEventListener('pointercancel', endDrag);
+      if (id === 'fire') btn.addEventListener('lostpointercapture', endDrag);
       root.appendChild(btn);
       this.buttons.set(id, btn);
     }
@@ -205,7 +223,6 @@ export class TouchControls {
     const end = (e: PointerEvent) => {
       if (e.pointerId !== stick.pointerId) return;
       stick.pointerId = null;
-      if (side === 'right' && this.lastAimMagnitude > 0.2 && e.type === 'pointerup' && this.mode === 'play') this.releasePulse = true;
       stick.x = 0;
       stick.y = 0;
       base.classList.add('hidden');
@@ -268,7 +285,30 @@ export class TouchControls {
     this.aim.y = 0;
     this.aim.active = false;
     this.releasePulse = false;
-    this.lastAimMagnitude = 0;
+    this.dropFire();
+  }
+
+  private pressFire(btn: HTMLElement, e: PointerEvent) {
+    if (this.firePointer !== null) return;
+    this.firePointer = e.pointerId;
+    btn.setPointerCapture(e.pointerId);
+    btn.classList.add('on');
+  }
+
+  private releaseFire(e: PointerEvent) {
+    if (e.pointerId !== this.firePointer) return;
+    if (e.type === 'pointerup' && this.mode === 'play') {
+      this.releasePulse = true;
+      this.throwPower = this.aim.active ? Math.max(0.15, this.aimMagnitude) : DEFAULT_THROW;
+    }
+    this.dropFire();
+  }
+
+  private dropFire() {
+    const btn = this.buttons.get('fire');
+    if (this.firePointer !== null && btn?.hasPointerCapture?.(this.firePointer)) btn.releasePointerCapture(this.firePointer);
+    this.firePointer = null;
+    btn?.classList.remove('on');
   }
 
   private track(stick: Stick, side: 'left' | 'right', e: PointerEvent) {
@@ -300,8 +340,6 @@ export class TouchControls {
     } else {
       this.aim.x = s.x;
       this.aim.y = s.y;
-      const m = Math.hypot(s.x, s.y);
-      if (s.pointerId !== null) this.lastAimMagnitude = m;
     }
   }
 
@@ -309,12 +347,13 @@ export class TouchControls {
     return Math.hypot(this.aim.x, this.aim.y);
   }
 
-  get lastThrowMagnitude(): number {
-    return this.lastAimMagnitude;
+  /** How far the last throw goes, as a share of the maximum: the aim stick's pull when the fire button was let go. */
+  get throwMagnitude(): number {
+    return this.throwPower;
   }
 
   get fireHeld(): boolean {
-    return this.mode === 'play' && this.aim.active && this.aimMagnitude > 0.35;
+    return this.mode === 'play' && this.firePointer !== null;
   }
 
   consumeRelease(): boolean {
@@ -465,6 +504,7 @@ export class TouchControls {
   }
 
   private baseSize(id: TouchButton): number {
+    if (id === 'fire') return Math.round(this.size * 1.5);
     return id === 'interact' ? Math.round(this.size * 1.3) : this.size;
   }
 
@@ -519,6 +559,7 @@ export class TouchControls {
     delete this.root.dataset.mode;
     document.body.style.removeProperty('--tb');
     document.body.style.removeProperty('--tb-big');
+    document.body.style.removeProperty('--tb-fire');
     document.body.classList.remove('touch-ui');
     this.root.innerHTML = '';
     this.root.classList.remove('preview');

@@ -11,6 +11,7 @@ import {
   THROWABLE,
   TICK_MS,
   TRAINING_MAP,
+  ZONE_PHASES,
   generateMap,
   playerSpeed,
   scopeOfItem,
@@ -43,7 +44,7 @@ import {
 import { onSettingsChange, settings, useTouchControls } from '../settings';
 import { esc } from '../ui/dom';
 import { nameHtml } from '../ui/names';
-import { sfx, stopAmbient, unlockAudio } from './audio';
+import { setMatchMusic, setMusicTension, sfx, stopAmbient, unlockAudio, type MusicTension } from './audio';
 import { GameScene } from './GameScene';
 import { Hud } from './Hud';
 import { mateColors } from './team';
@@ -101,6 +102,9 @@ export class GameSession {
   /** Where each visible marker was in the previous snapshot; null until the first one, so joining is quiet. */
   private markerSpots: Map<number, string> | null = null;
   private alive = 0;
+  /** performance.now() until which the match music stays tense after nearby fighting. */
+  private combatUntil = 0;
+  private musicTension: MusicTension | -1 = -1;
   private loot = new Map<number, LootNet>();
   private pendingLoot: { add: LootNet[]; del: number[] } = { add: [], del: [] };
   private pendingEvents: GameEvent[] = [];
@@ -157,6 +161,7 @@ export class GameSession {
     this.touch = useTouchControls()
       ? new TouchControls(document.getElementById('touch')!, (b) => this.onTouchButton(b), { training: start.mapId === TRAINING_MAP })
       : null;
+    setMatchMusic(start.mapId);
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     this.game = new Phaser.Game({
@@ -408,6 +413,8 @@ export class GameSession {
     const mode = this.touchMode();
     if (mode === 'off' || (mode === 'view' && b !== 'map' && b !== 'pause') || (mode === 'move' && b !== 'inventory')) return;
     switch (b) {
+      // held down, read every tick through TouchControls.fireHeld
+      case 'fire': return;
       case 'reload': return this.action({ t: 'reload' });
       case 'interact': return this.action({ t: 'interact' });
       case 'heal': return this.action({ t: 'heal' });
@@ -541,7 +548,7 @@ export class GameSession {
       }
       fire = throwable ? this.touch.consumeRelease() : this.touch.fireHeld;
       if (!throwable) this.touch.consumeRelease();
-      td = Math.max(0.15, this.touch.lastThrowMagnitude) * THROWABLE.maxDistance;
+      td = this.touch.throwMagnitude * THROWABLE.maxDistance;
     } else if (!this.touch) {
       if (!blocked) {
         if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) my -= 1;
@@ -705,7 +712,36 @@ export class GameSession {
     const pos = this.viewPosition();
     this.hud.update(snap.me, snap.alive, snap.z, snap.ad, snap.spectating, pos.x, pos.y, snap.tm ? { mates: snap.tm, teams: snap.teams ?? 0 } : null, this.markers);
     this.syncScopeHud();
+    this.updateMusicTension();
   };
+
+  /** 0 while exploring, 1 when fighting is near or the circle closes in, 2 for the endgame or a close fight on low health. */
+  private updateMusicTension() {
+    let level: MusicTension = 0;
+    if (!this.lobby && !this.ended) {
+      const training = this.start.mapId === TRAINING_MAP;
+      const total = this.start.roster.length;
+      const combat = performance.now() < this.combatUntil;
+      const zone = this.zone;
+      const finalCircle = !!zone && zone[6] >= ZONE_PHASES.length - 1;
+      const lowHp = !!this.me && this.me.alive && !this.spectating && this.me.hp <= 35;
+      const few = !training && total > 2 && this.alive <= Math.min(3, Math.ceil(total * 0.25));
+      if (few || (combat && (lowHp || finalCircle))) level = 2;
+      else if (combat || zone?.[7] === 'shrink' || finalCircle || (!training && total > 2 && this.alive <= Math.max(2, Math.ceil(total * 0.4)))) level = 1;
+    }
+    if (level === this.musicTension) return;
+    this.musicTension = level;
+    setMusicTension(level);
+  }
+
+  private noteCombat(ms: number) {
+    this.combatUntil = Math.max(this.combatUntil, performance.now() + ms);
+  }
+
+  private nearView(x: number, y: number, range: number): boolean {
+    const v = this.viewPosition();
+    return Math.hypot(x - v.x, y - v.y) <= range;
+  }
 
   private reconcile(snap: SnapshotMsg) {
     const me = snap.me;
@@ -766,6 +802,17 @@ export class GameSession {
       case 'hurt':
         this.hud.hurt();
         sfx.hurt();
+        this.noteCombat(10_000);
+        break;
+      // on the training range your own practice on the boars shouldn't turn the music into a battle
+      case 'dmg':
+        if (this.start.mapId !== TRAINING_MAP) this.noteCombat(8_000);
+        break;
+      case 'shot':
+        if ((e.pid !== this.you || this.start.mapId !== TRAINING_MAP) && this.nearView(e.x, e.y, 650)) this.noteCombat(6_000);
+        break;
+      case 'boom':
+        if (this.nearView(e.x, e.y, 700)) this.noteCombat(6_000);
         break;
       case 'pickup':
         // the server switches only to a stronger scope; then a stale local choice must not override it
@@ -922,6 +969,7 @@ export class GameSession {
     this.touch?.destroy();
     this.hud.destroy();
     stopAmbient();
+    setMatchMusic(null);
     this.game.destroy(true);
   }
 }

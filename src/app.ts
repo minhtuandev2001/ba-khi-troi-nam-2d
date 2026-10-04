@@ -6,11 +6,14 @@ import {
   BOT_DIFFICULTY_NAMES,
   DEFAULT_BOT_DIFFICULTY,
   DEFAULT_MAP,
+  LEADERBOARD_KINDS,
+  LEADERBOARD_NAMES,
   MAP_DEFS,
   MAP_IDS,
   MATCH_HISTORY_KEEP,
   MODE_NAMES,
   NAME_MAX_LENGTH,
+  PRESENCE_LABELS,
   NAME_MIN_LENGTH,
   PASSWORD_MAX_LENGTH,
   PASSWORD_MIN_LENGTH,
@@ -21,16 +24,20 @@ import {
   TRAINING_LANES,
   generateMap,
   isBotDifficulty,
+  isLeaderboardKind,
   isMapChoice,
   isTeamSize,
   isUuid,
   levelFromXp,
   mapCapacity,
   validatePassword,
+  validateRoomName,
   validateUsername,
   xpForLevel,
+  type AdminAccount,
   type BotDifficulty,
   type GameMode,
+  type LeaderboardKind,
   type LiveMatchSummary,
   type MapChoice,
   type MapId,
@@ -38,8 +45,11 @@ import {
   type MatchStartMsg,
   type PartyInviteMsg,
   type PartyStateMsg,
+  type Presence,
   type PublicUser,
   type QueueStatusMsg,
+  type RankBoard,
+  type RankEntry,
   type RoomMember,
   type RoomStateMsg,
   type RoomSummary,
@@ -56,6 +66,7 @@ import { setDevtoolsAllowed } from './ui/devtoolsGuard';
 import { $, confirmDialog, esc, formatDate, formatDuration, html, toast } from './ui/dom';
 import { enterFullscreen, leaveFullscreen } from './ui/fullscreen';
 import { NetStatus, SERVER_WAKING_TEXT } from './ui/netStatus';
+import { cachedQrSvg, isLocalOnly, qrSvg, showQrDialog } from './ui/qr';
 import { bindSettings, guidePanel, itemsPanel, keysPanel, settingsPanel } from './ui/panels';
 import { walker } from './ui/loader';
 import { adminBadge, nameHtml } from './ui/names';
@@ -65,7 +76,7 @@ import { syncLayouts } from './ui/touchLayout';
 import { SocialClient } from './social/SocialClient';
 import { SocialPanel } from './social/SocialPanel';
 
-type Screen = 'loading' | 'auth' | 'lobby' | 'queue' | 'room' | 'party' | 'profile' | 'panel' | 'controls' | 'game' | 'message';
+type Screen = 'loading' | 'auth' | 'lobby' | 'queue' | 'room' | 'party' | 'profile' | 'ranks' | 'admin' | 'panel' | 'controls' | 'game' | 'message';
 /** Screens on the way into a match, or in one; leaving them for anything else ends fullscreen on phones. */
 const PLAY_SCREENS = new Set<Screen>(['queue', 'room', 'party', 'game']);
 /** Requests sent by the tap that starts a match (or the wait for one); phones go fullscreen right then. */
@@ -80,11 +91,12 @@ const HISTORY_PAGE_SIZE = 10;
 const TAGLINE = 'Nghịch cảnh càng lớn, ý chí càng mạnh.';
 
 type PanelNav = 'guide' | 'items' | 'keys' | 'settings';
-type NavKey = 'lobby' | 'profile' | 'controls' | PanelNav;
+type NavKey = 'lobby' | 'profile' | 'ranks' | 'admin' | 'controls' | PanelNav;
 type NavButton = [nav: NavKey, icon: string, label: string];
 /** Every menu screen shows the same toolbar (only the highlight moves), so the header never shifts. */
 const NAV_BUTTONS: NavButton[] = [
   ['lobby', '🏠', 'Sảnh'],
+  ['ranks', '🏆', 'Xếp hạng'],
   ['guide', '📖', 'Hướng dẫn'],
   ['items', '🎒', 'Vật phẩm'],
   ['keys', '⌨️', 'Phím tắt'],
@@ -92,6 +104,8 @@ const NAV_BUTTONS: NavButton[] = [
 ];
 /** Touch screens have no keyboard shortcuts to list; the button editor takes that place, as in the pause menu. */
 const TOUCH_NAV_BUTTONS: NavButton[] = NAV_BUTTONS.map((b) => (b[0] === 'keys' ? ['controls', '🎛️', 'Chỉnh nút'] : b));
+const ADMIN_NAV_BUTTON: NavButton = ['admin', '🛡️', 'Quản trị'];
+const PRESENCE_ICONS: Record<Presence, string> = { online: '🟢', in_match: '⚔️', offline: '⚪' };
 
 /** Phaser is most of the bundle, so the game code is a separate chunk: fetched in the background after login, awaited on match start. */
 let gameModule: Promise<typeof import('./game/session')> | null = null;
@@ -148,8 +162,8 @@ const mapTile = (id: MapChoice, selected: boolean, compact: boolean, disabled: b
     ? '<div class="map-thumb random">🎲</div>'
     : `<canvas class="map-thumb" width="160" height="160" data-preview="${id}"></canvas>`;
   const cap = id === 'random' ? `${SMALLEST_MAP}–${mapCapacity(id)}` : String(mapCapacity(id));
-  return `<button type="button" class="map-tile${compact ? ' compact' : ''}${selected ? ' active' : ''}" data-map="${id}" ${disabled ? 'disabled' : ''} title="${esc(m.blurb)}">
-    ${thumb}<b>${m.icon} ${esc(m.name)}</b><span class="map-cap">👥 ${cap} người</span>${compact ? '' : `<small>${esc(m.blurb)}</small>`}</button>`;
+  return `<button type="button" class="map-tile${compact ? ' compact' : ''}${selected ? ' active' : ''}" data-map="${id}" ${disabled ? 'disabled' : ''} title="${esc(`${m.name} (${cap} người): ${m.blurb}`)}">
+    ${thumb}<b>${m.icon} ${esc(m.name)}</b><span class="map-cap">👥 ${cap}${compact ? '' : ' người'}</span>${compact ? '' : `<small>${esc(m.blurb)}</small>`}</button>`;
 };
 
 const previews = new Map<MapId, MapRenderer>();
@@ -165,6 +179,45 @@ function paintPreviews(root: ParentNode) {
   }
 }
 
+const RANKS_CACHE_MS = 30_000;
+const RANK_ICONS: Record<LeaderboardKind, string> = { kills: '⚔️', level: '⭐', survival: '⏱️', kd: '🎯', winrate: '👑' };
+/** Tab labels; short enough for five tabs side by side on a phone. */
+const RANK_TABS: Record<LeaderboardKind, string> = { kills: 'Hạ gục', level: 'Cấp độ', survival: 'Sống sót', kd: 'K/D', winrate: '% Thắng' };
+const RANK_NOTES: Record<LeaderboardKind, string> = {
+  kills: 'Tổng số đối thủ đã hạ gục qua mọi trận.',
+  level: 'Xếp theo tổng kinh nghiệm tích lũy.',
+  survival: 'Thời gian sống trung bình mỗi trận.',
+  kd: 'Số hạ gục chia cho số trận không thắng.',
+  winrate: 'Tỉ lệ trận về nhất trên tổng số trận.',
+};
+const RANK_MEDALS = ['🥇', '🥈', '🥉'];
+
+function rankValue(kind: LeaderboardKind, e: RankEntry): [main: string, sub: string] {
+  switch (kind) {
+    case 'kills': return [e.value.toLocaleString('vi-VN'), 'hạ gục'];
+    case 'level': return [`Cấp ${e.level}`, `${e.value.toLocaleString('vi-VN')} XP`];
+    case 'survival': return [formatDuration(e.value), 'trung bình'];
+    case 'kd': return [e.value.toFixed(2), 'K/D'];
+    case 'winrate': return [`${(e.value * 100).toFixed(1)}%`, 'thắng'];
+  }
+}
+
+function rankRow(kind: LeaderboardKind, e: RankEntry, me: boolean) {
+  const [main, sub] = rankValue(kind, e);
+  const place = e.rank <= 3 ? `<span class="rank-medal" aria-label="Hạng ${e.rank}">${RANK_MEDALS[e.rank - 1]}</span>` : `#${e.rank}`;
+  const info = kind === 'level' ? `${e.matches} trận` : `Cấp ${e.level} · ${e.matches} trận`;
+  return `<div class="rank-row${e.rank <= 3 ? ` top top${e.rank}` : ''}${me ? ' me' : ''}">
+    <span class="rank-no">${place}</span><span class="rank-avatar" aria-hidden="true">${e.avatar}</span>
+    <span class="rank-who"><b>${nameHtml(e.username, e.admin)}</b><small>${info}</small></span>
+    <span class="rank-val"><b>${main}</b><small>${sub}</small></span></div>`;
+}
+
+function rankEntryHint(kind: LeaderboardKind, board: RankBoard) {
+  if (kind === 'kills') return 'Hạ gục đối thủ đầu tiên để có tên trên bảng này.';
+  if (kind === 'level') return 'Chơi một trận để có tên trên bảng này.';
+  return `Cần chơi ít nhất ${board.minMatches} trận để vào bảng này (bạn đã chơi ${board.myMatches}).`;
+}
+
 const avatarPicker = (selected: string) =>
   `<div class="avatar-picker">${AVATARS.map((a) => `<button type="button" data-avatar="${a}" class="${a === selected ? 'active' : ''}" title="${AVATAR_NAMES[a]}" aria-label="${AVATAR_NAMES[a]}">${a}</button>`).join('')}</div>`;
 
@@ -177,6 +230,14 @@ export class App {
   private layoutEditor: TouchControls | null = null;
   /** Which menu page is showing while the screen is 'panel', so the button editor page can return to it. */
   private panelNav: PanelNav = 'settings';
+  private ranksKind: LeaderboardKind = 'kills';
+  private adminQuery = '';
+  private adminSeq = 0;
+  private adminAccounts: AdminAccount[] = [];
+  private readonly ranksCache = new Map<LeaderboardKind, { at: number; board: RankBoard }>();
+  /** The room's QR code dialog; it belongs to the room screen and closes with it. */
+  private closeQr: (() => void) | null = null;
+  private qrOpening = false;
   /** Bumped whenever a pending game load must be discarded (newer match, logout, replaced session). */
   private gameLoad = 0;
   private screen: Screen = 'loading';
@@ -263,7 +324,7 @@ export class App {
     document.body.classList.remove('net-pending');
   }
 
-  private async copyText(text: string, label: string) {
+  private async copyText(text: string, label: string): Promise<boolean> {
     try {
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(text);
@@ -279,13 +340,16 @@ export class App {
         if (!ok) throw new Error('copy failed');
       }
       toast(`Đã sao chép ${label}`);
+      return true;
     } catch {
       toast('Trình duyệt không cho phép sao chép, hãy chạm giữ vào mã để chép thủ công.', 'error', 4000);
+      return false;
     }
   }
 
   private loadFailed(title: string, err: unknown, retry: () => void) {
-    this.render(this.screen, `<div class="screen"><div class="container">${this.header(this.screen === 'profile' ? 'profile' : null)}
+    const nav = this.screen === 'profile' || this.screen === 'ranks' ? this.screen : null;
+    this.render(this.screen, `<div class="screen"><div class="container">${this.header(nav)}
       <div class="card center"><h2>${esc(title)}</h2><p class="muted">${esc((err as Error).message)}</p>
       <button class="btn primary" id="retry">Thử lại</button></div></div></div>`);
     this.bindNav();
@@ -296,6 +360,7 @@ export class App {
     // fullscreen turned on by a play button ends when the player backs out without playing (left the queue or room)
     if (PLAY_SCREENS.has(this.screen) && !PLAY_SCREENS.has(screen)) leaveFullscreen();
     if (screen !== 'controls') this.closeLayoutEditor();
+    if (screen !== 'room') this.closeQr?.();
     this.screen = screen;
     this.ui.innerHTML = markup;
     this.ui.classList.toggle('hidden', screen === 'game');
@@ -343,7 +408,7 @@ export class App {
     const pendingParty = sessionStorage.getItem(PENDING_PARTY_KEY);
     let avatar: string = AVATARS[Math.floor(Math.random() * AVATARS.length)];
     this.render('auth', `
-      <div class="screen">
+      <div class="screen auth-screen${tab === 'register' ? ' auth-reg' : ''}">
         <div class="logo-kicker">Huyền sử Văn Lang</div>
         <div class="logo">BÁ KHÍ<span>TRỜI NAM 2D</span></div>
         <div class="subtitle">${TAGLINE}</div>
@@ -356,27 +421,27 @@ export class App {
               <button class="btn ${tab === 'register' ? 'active' : ''}" data-tab="register">Đăng ký</button>
             </div>
             <form id="auth-form" autocomplete="on" novalidate>
-              <div class="field"><label>Tên đăng nhập</label>
+              <div class="field f-name"><label>Tên đăng nhập</label>
                 <input class="input" name="username" maxlength="${NAME_MAX_LENGTH}" autocomplete="username" required /></div>
               ${tab === 'register' ? `<ul class="checklist" id="name-rules">
-                <li data-rule="len">Từ ${NAME_MIN_LENGTH} đến ${NAME_MAX_LENGTH} ký tự</li>
-                <li data-rule="chars">Bắt đầu bằng chữ cái, chỉ gồm chữ không dấu, số, dấu _</li>
+                <li data-rule="len">${NAME_MIN_LENGTH}–${NAME_MAX_LENGTH} ký tự</li>
+                <li data-rule="chars">Bắt đầu bằng chữ cái; chỉ chữ không dấu, số, dấu _</li>
               </ul>` : ''}
-              <div class="field"><label>Mật khẩu</label>
+              <div class="field f-pass"><label>Mật khẩu</label>
                 <input class="input" type="password" name="password" maxlength="${PASSWORD_MAX_LENGTH}" autocomplete="${tab === 'login' ? 'current-password' : 'new-password'}" required /></div>
               ${tab === 'register' ? `
                 <ul class="checklist" id="pw-rules">
-                  <li data-rule="len">Từ ${PASSWORD_MIN_LENGTH} đến ${PASSWORD_MAX_LENGTH} ký tự</li>
-                  <li data-rule="upper">Có chữ in hoa (A-Z)</li>
-                  <li data-rule="lower">Có chữ thường (a-z)</li>
-                  <li data-rule="digit">Có chữ số (0-9)</li>
-                  <li data-rule="special">Có ký tự đặc biệt (! @ # $ % ...)</li>
-                  <li data-rule="space">Không có khoảng trắng</li>
-                  <li data-rule="name">Không chứa tên đăng nhập</li>
+                  <li data-rule="len">${PASSWORD_MIN_LENGTH}–${PASSWORD_MAX_LENGTH} ký tự</li>
+                  <li data-rule="upper">Chữ in hoa A-Z</li>
+                  <li data-rule="lower">Chữ thường a-z</li>
+                  <li data-rule="digit">Chữ số 0-9</li>
+                  <li data-rule="special">Ký tự đặc biệt !@#…</li>
+                  <li data-rule="space">Không khoảng trắng</li>
+                  <li data-rule="name" class="wide">Không chứa tên đăng nhập</li>
                 </ul>
-                <div class="field"><label>Nhập lại mật khẩu</label>
+                <div class="field f-confirm"><label>Nhập lại mật khẩu</label>
                   <input class="input" type="password" name="confirm" maxlength="${PASSWORD_MAX_LENGTH}" autocomplete="new-password" required /></div>
-                <div class="field"><label>Chọn ảnh đại diện</label>
+                <div class="field f-avatar"><label>Chọn ảnh đại diện</label>
                   ${avatarPicker(avatar)}</div>
                 <div class="hp-field" aria-hidden="true"><label>Để trống ô này<input name="website" tabindex="-1" autocomplete="off" /></label></div>` : ''}
               <div class="error" id="auth-error"></div>
@@ -495,6 +560,8 @@ export class App {
     this.browserTab = 'rooms';
     this.party = null;
     this.queue = null;
+    this.adminQuery = '';
+    this.adminAccounts = [];
     this.clearPending();
     this.showAuth('login');
   }
@@ -625,6 +692,10 @@ export class App {
       this.clearPending();
       this.startGame(msg);
     });
+    s.on('account:deleted', () => {
+      this.logout();
+      toast('Tài khoản của bạn đã bị quản trị viên xoá.', 'error', 10000);
+    });
     s.on('session:replaced', () => {
       disconnectSocket();
       this.socket = null;
@@ -718,7 +789,7 @@ export class App {
         </span>
       </button>
       <div class="row topbar-actions">
-        ${(useTouchControls() ? TOUCH_NAV_BUTTONS : NAV_BUTTONS).map(([nav, icon, label]) => `<button class="btn small tool-btn${nav === current ? ' active' : ''}" data-nav="${nav}" title="${label}" aria-label="${label}"${nav === current ? ' aria-current="page"' : ''}><span>${icon}</span><em>${label}</em></button>`).join('')}
+        ${[...(useTouchControls() ? TOUCH_NAV_BUTTONS : NAV_BUTTONS), ...(this.isAdmin ? [ADMIN_NAV_BUTTON] : [])].map(([nav, icon, label]) => `<button class="btn small tool-btn${nav === current ? ' active' : ''}" data-nav="${nav}" title="${label}" aria-label="${label}"${nav === current ? ' aria-current="page"' : ''}><span>${icon}</span><em>${label}</em></button>`).join('')}
         <button class="btn small logout-btn" data-nav="logout" title="Đăng xuất" aria-label="Đăng xuất"><i aria-hidden="true">🚪</i><em>Đăng xuất</em></button>
       </div>
     </div>`;
@@ -738,6 +809,8 @@ export class App {
       case 'lobby': return this.showLobby();
       case 'logout': return this.logout();
       case 'profile': return this.showProfile();
+      case 'ranks': return void this.showRanks();
+      case 'admin': return void this.showAdmin();
       case 'controls': return void this.showControls();
       case 'guide': return this.showPanel('guide', '📖 Hướng dẫn chơi', guidePanel());
       case 'items': return this.showPanel('items', '🎒 Vật phẩm trong game', itemsPanel());
@@ -778,7 +851,7 @@ export class App {
             </aside>
             <div class="modes">
               <div class="card mode-card" data-mode="pvp">
-                <div class="icon">${MODE_ICONS.pvp}</div><h3>${MODE_NAMES.pvp}</h3>
+                <div class="icon">${MODE_ICONS.pvp}</div><h3>Đấu người</h3>
                 <p>Ghép trận tự động trên bản đồ ${esc(MAP_DEFS[DEFAULT_MAP].name)}.</p>
                 <div class="diff-seg" role="radiogroup" aria-label="Kiểu ghép trận">
                   ${TEAM_SIZES.map((n) => `<button type="button" role="radio" data-team="${n}" aria-checked="${n === team}">${TEAM_SIZE_NAMES[n]}</button>`).join('')}
@@ -797,7 +870,7 @@ export class App {
               </div>
               <div class="card mode-card" data-mode="private">
                 <div class="icon">${MODE_ICONS.private}</div><h3>${MODE_NAMES.private}</h3>
-                <p>Tạo phòng có tên riêng. Mọi người vào từ danh sách phòng, bạn bè vào bằng mã hoặc link.</p>
+                <p>Tạo phòng riêng, mời bạn bè bằng mã hoặc link.</p>
                 <div class="ornament"></div>
                 <button class="btn primary mode-cta" id="create-room">Tạo phòng</button>
                 <div class="join-row">
@@ -807,7 +880,7 @@ export class App {
               </div>
               <div class="card mode-card" data-mode="training">
                 <div class="icon">${MODE_ICONS.training}</div><h3>${MODE_NAMES.training}</h3>
-                <p>Cung, nỏ và tên được cấp miễn phí. Bắn lợn rừng chạy qua lại ở các làn bia từ ${TRAINING_LANES[0].distance} đến ${TRAINING_LANES[TRAINING_LANES.length - 1].distance}. Không tính điểm, không mất máu.</p>
+                <p>Bắn lợn rừng ở làn ${TRAINING_LANES[0].distance}–${TRAINING_LANES[TRAINING_LANES.length - 1].distance}. Có sẵn cung nỏ, không mất máu.</p>
                 <div class="ornament"></div>
                 <span class="btn primary mode-cta">Vào tập bắn</span>
               </div>
@@ -1074,6 +1147,12 @@ export class App {
       e.preventDefault();
       const listedNow = box.querySelector<HTMLInputElement>('#new-room-listed')!.checked;
       const roomName = name.value.trim();
+      const nameError = validateRoomName(roomName);
+      if (nameError) {
+        toast(nameError, 'error');
+        name.focus();
+        return;
+      }
       localStorage.setItem(ROOM_TEAM_KEY, String(teamSize));
       localStorage.setItem(ROOM_LISTED_KEY, listedNow ? '1' : '0');
       localStorage.setItem(ROOM_NAME_KEY, roomName);
@@ -1098,11 +1177,11 @@ export class App {
         : q.teamSize > 1 ? 'Sẽ được ghép với người chơi ngẫu nhiên cho đủ đội' : 'Mỗi người một đội, trụ lại cuối cùng để thắng';
       this.render('queue', `
         <div class="screen fit"><div class="container">${this.header('lobby')}
-          <div class="center-fill"><div class="narrow"><div class="card center">
+          <div class="center-fill"><div class="narrow q-wrap"><div class="card center q-card">
             <h2>⚔️ Đang tìm trận <span class="badge gold">${esc(teamName)}</span></h2>
             <p class="muted q-mode">${esc(partyLine)}</p>
             ${walker('Đang tìm trận')}
-            <div class="logo" style="font-size:42px" id="q-count"></div>
+            <div class="logo q-count" id="q-count"></div>
             <p class="muted">Thời gian chờ: <b id="q-time">0:00</b></p>
             <div id="q-notice"></div>
             <div class="spacer"></div>
@@ -1172,20 +1251,22 @@ export class App {
     this.render('party', `
       <div class="screen fit"><div class="container">${this.header('lobby')}
         <div class="grid cols-2 fill-grid">
-          <div class="card party-card">
+          <div class="card fill-card party-card">
             <div class="row between party-head">
               <h2>👥 Nhóm ${party.size} người</h2>
               ${isLeader ? `<div class="diff-seg party-size" role="radiogroup" aria-label="Số người mỗi đội">
                 ${TEAM_SIZES.filter((n) => n > 1).map((n) => `<button type="button" role="radio" data-size="${n}" aria-checked="${n === party.size}" ${n < count ? 'disabled' : ''}>${TEAM_SIZE_NAMES[n]}</button>`).join('')}
               </div>` : ''}
             </div>
-            <p class="muted">Ghép trận tự động trên bản đồ ${esc(MAP_DEFS[DEFAULT_MAP].name)}. Đồng đội không bắn trúng nhau, đội trụ lại cuối cùng giành chiến thắng.</p>
-            <div class="party-slots size-${party.size}">${slots}</div>
-            <label class="switch-row${isLeader ? '' : ' readonly'}">
-              <input type="checkbox" id="party-fill" ${party.fill ? 'checked' : ''} ${isLeader ? '' : 'disabled'} />
-              <span class="switch" aria-hidden="true"></span>
-              <span><b>Ghép thêm người lạ cho đủ đội</b><small class="muted">${party.fill ? 'Bật: chỗ trống được ghép với người chơi ngẫu nhiên.' : 'Tắt: chỉ đi cùng những người đang trong nhóm.'}</small></span>
-            </label>
+            <div class="card-scroll ui-scroll party-body">
+              <p class="muted">Ghép trận tự động trên bản đồ ${esc(MAP_DEFS[DEFAULT_MAP].name)}. Đồng đội không bắn trúng nhau, đội trụ lại cuối cùng giành chiến thắng.</p>
+              <div class="party-slots size-${party.size}">${slots}</div>
+              <label class="switch-row${isLeader ? '' : ' readonly'}">
+                <input type="checkbox" id="party-fill" ${party.fill ? 'checked' : ''} ${isLeader ? '' : 'disabled'} />
+                <span class="switch" aria-hidden="true"></span>
+                <span><b>Ghép thêm người lạ cho đủ đội</b><small class="muted">${party.fill ? 'Bật: chỗ trống được ghép với người chơi ngẫu nhiên.' : 'Tắt: chỉ đi cùng những người đang trong nhóm.'}</small></span>
+              </label>
+            </div>
             <div class="spacer"></div>
             ${isLeader
               ? `<button class="btn primary big block" id="party-queue">⚔️ Tìm trận</button><p class="muted center party-hint">${esc(hint)}</p>`
@@ -1339,19 +1420,34 @@ export class App {
         : needTeams ? 'Cần ít nhất 2 đội có người. Chuyển sang ô của đội khác hoặc thêm bot.' : '';
     // the room re-renders on every member change, so keep the list where the player scrolled it
     const keepScroll = this.screen === 'room' ? (this.ui.querySelector('#room-members')?.scrollTop ?? 0) : 0;
+    const keepSetupScroll = this.screen === 'room' ? (this.ui.querySelector('#room-setup')?.scrollTop ?? 0) : 0;
+    const keepMapsScroll = this.screen === 'room' ? (this.ui.querySelector('#room-maps')?.scrollLeft ?? 0) : 0;
     this.render('room', `
       <div class="screen fit"><div class="container">${this.header('lobby')}
         <div class="grid cols-2 fill-grid">
-          <div class="card">
+          <div class="card fill-card room-setup">
             <h2 class="room-title" title="${esc(room.name)}">🏮 ${esc(room.name)}</h2>
             <p class="muted room-visibility">${room.listed ? '🌐 Đang hiện ở danh sách phòng ngoài sảnh, ai cũng vào được.' : '🔒 Phòng kín: chỉ vào được bằng mã phòng hoặc link mời.'}</p>
-            <div class="field"><label>Mã phòng</label><div class="code">${esc(room.id)}</div></div>
-            <div class="field compact-hide"><label>Link mời</label><div class="code">${esc(link)}</div></div>
-            <div class="row btn-pair">
-              <button class="btn" id="copy-code">📋 Sao chép mã</button>
-              <button class="btn" id="copy-link">🔗 Sao chép link mời</button>
+            <div class="card-scroll ui-scroll" id="room-setup">
+            <div class="room-invite">
+              <button type="button" class="invite-qr" id="room-qr" title="Phóng to mã QR cho người khác quét" aria-label="Phóng to mã QR cho người khác quét">
+                <span class="invite-qr-code">${cachedQrSvg(link) ?? '<span class="invite-qr-wait"></span>'}</span>
+                <span class="invite-qr-zoom">🔍 Phóng to</span>
+              </button>
+              <div class="invite-info">
+                <div class="invite-field">
+                  <label>Mã phòng</label>
+                  <div class="invite-copy"><span class="invite-text selectable" title="${esc(room.id)}">${esc(room.id)}</span><button type="button" class="btn small" id="copy-code" aria-label="Sao chép mã phòng">📋<span> Chép</span></button></div>
+                </div>
+                <div class="invite-field">
+                  <label>Link mời</label>
+                  <div class="invite-copy"><span class="invite-text selectable" title="${esc(link)}">${esc(link)}</span><button type="button" class="btn small" id="copy-link" aria-label="Sao chép link mời">🔗<span> Chép</span></button></div>
+                </div>
+                ${isLocalOnly(link)
+                  ? '<p class="invite-hint warn">⚠️ Đang mở bằng localhost: máy khác quét mã sẽ không vào được.</p>'
+                  : '<p class="invite-hint muted compact-hide">Quét mã, hoặc gửi mã/link cho bạn bè. Người chưa có tài khoản sẽ đăng ký rồi tự vào phòng.</p>'}
+              </div>
             </div>
-            <p class="muted compact-hide">Gửi mã hoặc link cho bạn bè. Người chưa có tài khoản sẽ được yêu cầu đăng ký rồi tự vào phòng.</p>
             <div class="field"><label>Kiểu đội${isHost ? '' : ' <span class="muted">(chủ phòng chọn)</span>'}</label>
               <div class="diff-seg room-team-seg" role="radiogroup" aria-label="Kiểu đội" id="room-team-size">
                 ${TEAM_SIZES.map((n) => `<button type="button" role="radio" data-size="${n}" aria-checked="${n === teamSize}" ${isHost ? '' : 'disabled'}>${TEAM_SIZE_NAMES[n]}</button>`).join('')}
@@ -1359,6 +1455,7 @@ export class App {
             </div>
             <div class="field"><label>Bản đồ${isHost ? '' : ' <span class="muted">(chủ phòng chọn)</span>'}</label>
               <div class="map-grid compact" id="room-maps">${MAP_CHOICES.map((id) => mapTile(id, id === room.map, true, !isHost || mapCapacity(id) < total)).join('')}</div>
+            </div>
             </div>
           </div>
           <div class="card fill-card">
@@ -1369,7 +1466,7 @@ export class App {
             ${isHost ? `
               <div class="row btn-pair">
                 <button class="btn" id="add-bot" ${total >= room.max ? 'disabled' : ''}>🤖 Thêm bot</button>
-                <button class="btn" id="fill-bots" ${total >= room.max ? 'disabled' : ''}>Thêm bot cho đủ ${room.max}</button>
+                <button class="btn" id="fill-bots" ${total >= room.max ? 'disabled' : ''} title="Thêm bot cho đủ ${room.max} người">👥 Lấp đủ ${room.max}</button>
               </div>
               ${botCount ? '<div class="spacer"></div><button class="btn block" id="clear-bots">🧹 Xóa hết bot</button>' : ''}
               <div class="spacer"></div>
@@ -1382,10 +1479,38 @@ export class App {
         </div>
       </div></div>`);
     $('#room-members').scrollTop = keepScroll;
+    $('#room-setup').scrollTop = keepSetupScroll;
+    $('#room-maps').scrollLeft = keepMapsScroll;
     paintPreviews($('#room-maps'));
     this.bindNav();
-    $('#copy-code').addEventListener('click', () => void this.copyText(room.id, 'mã phòng'));
-    $('#copy-link').addEventListener('click', () => void this.copyText(link, 'link mời'));
+    const copyButton = (id: string, text: string, label: string) => {
+      const btn = $(id);
+      const idle = btn.innerHTML;
+      btn.addEventListener('click', async () => {
+        if (!(await this.copyText(text, label))) return;
+        btn.innerHTML = '✓<span> Đã chép</span>';
+        btn.classList.add('done');
+        window.setTimeout(() => {
+          btn.innerHTML = idle;
+          btn.classList.remove('done');
+        }, 1500);
+      });
+    };
+    copyButton('#copy-code', room.id, 'mã phòng');
+    copyButton('#copy-link', link, 'link mời');
+    $('#room-qr').addEventListener('click', () => void this.showRoomQr(room.name, room.id, link));
+    if (!cachedQrSvg(link)) {
+      qrSvg(link).then(
+        (svg) => {
+          const box = this.ui.querySelector('#room-qr .invite-qr-code');
+          if (box && this.room?.id === room.id) box.innerHTML = svg;
+        },
+        () => {
+          const box = this.ui.querySelector('#room-qr .invite-qr-code');
+          if (box) box.innerHTML = '<span class="invite-qr-fail">Không tạo được mã QR</span>';
+        },
+      );
+    }
     $('#leave-room').addEventListener('click', () => this.send('room:leave'));
     $('#room-members').addEventListener('click', (e) => {
       const slot = (e.target as HTMLElement).closest<HTMLElement>('[data-slot]')?.dataset.slot;
@@ -1434,36 +1559,36 @@ export class App {
       this.render('profile', `
         <div class="screen fit"><div class="container">${this.header('profile')}
           <div class="grid cols-2">
-            <div class="card">
+            <div class="card profile-info">
               <h2>👤 Thông tin nhân vật</h2>
               <div class="row"><span class="avatar lg">${esc(user.avatar)}</span>
                 <div><h3 style="margin:0">${nameHtml(user.username, user.role === 'admin')}</h3>
                   <div class="muted">Cấp ${level} · ${user.xp} XP tổng</div>
                   <div class="xpbar" style="width:200px;margin-top:6px"><div style="width:${((user.xp - from) / (to - from)) * 100}%"></div></div>
                   <div class="muted" style="font-size:12px">Còn ${to - user.xp} XP để lên cấp ${level + 1}</div>
-                  <div class="muted" style="font-size:12px">Tham gia: ${formatDate(user.createdAt)}</div></div></div>
+                  <div class="muted profile-joined" style="font-size:12px">Tham gia: ${formatDate(user.createdAt)}</div></div></div>
               <div class="spacer"></div>
               <label class="muted">Đổi ảnh đại diện</label>
               ${avatarPicker(user.avatar)}
-              <p class="muted" style="font-size:12px">Cấp độ chỉ để thể hiện, không ảnh hưởng tới sức mạnh trong trận.</p>
+              <p class="muted compact-hide" style="font-size:12px">Cấp độ chỉ để thể hiện, không ảnh hưởng tới sức mạnh trong trận.</p>
             </div>
             <div class="card">
               <h2>📊 Thống kê</h2>
-              <div class="grid cols-4">
+              <div class="grid profile-stats">
                 ${stat(stats.matches, 'Số trận')}
                 ${stat(stats.wins, 'Trận thắng')}
                 ${stat(`${winRate}%`, 'Tỉ lệ thắng')}
-                ${stat(stats.kills, 'Người đã hạ')}
+                ${stat(stats.kills, 'Đã hạ')}
                 ${stat((stats.kills / losses).toFixed(2), 'K/D')}
-                ${stat(stats.bestDamage, 'Sát thương cao nhất')}
-                ${stat(stats.avgPlacement ? `#${stats.avgPlacement.toFixed(1)}` : '—', 'Thứ hạng TB')}
-                ${stat(stats.avgSurvivalMs ? formatDuration(stats.avgSurvivalMs) : '—', 'Thời gian sống TB')}
-                ${stat(stats.bestKills, 'Hạ nhiều nhất / trận')}
+                ${stat(stats.bestDamage, 'Sát thương đỉnh')}
+                ${stat(stats.avgPlacement ? `#${stats.avgPlacement.toFixed(1)}` : '—', 'Hạng TB')}
+                ${stat(stats.avgSurvivalMs ? formatDuration(stats.avgSurvivalMs) : '—', 'Sống TB')}
+                ${stat(stats.bestKills, 'Kỷ lục hạ')}
               </div>
             </div>
           </div>
           <div class="spacer"></div>
-          <div class="card fill-card" id="history-card" style="--list-min:240px"></div>
+          <div class="card fill-card history-card" id="history-card"></div>
         </div></div>`);
       this.bindNav();
       this.renderHistory(history, 0);
@@ -1509,8 +1634,8 @@ export class App {
       .join('');
     const pages = Math.max(1, Math.ceil(total / HISTORY_PAGE_SIZE));
     card.innerHTML = `
-      <h2>📜 Lịch sử trận đấu (${total} trận gần nhất)</h2>
-      <p class="muted">Chỉ lưu ${MATCH_HISTORY_KEEP} trận gần nhất, thống kê phía trên vẫn tính mọi trận đã chơi.</p>
+      <h2>📜 Lịch sử trận đấu <span class="badge">${total} trận</span></h2>
+      <p class="muted compact-hide">Chỉ lưu ${MATCH_HISTORY_KEEP} trận gần nhất, thống kê phía trên vẫn tính mọi trận đã chơi.</p>
       ${items.length ? `<div class="card-scroll ui-scroll"><table class="list nowrap">
         <thead><tr><th>Thời gian</th><th>Chế độ</th><th>Bản đồ</th><th>Hạng</th><th>Hạ gục</th><th>Sát thương</th><th>Sống sót</th><th>XP</th></tr></thead>
         <tbody>${rows}</tbody></table></div>` : '<p class="muted">Bạn chưa chơi trận nào.</p>'}
@@ -1535,6 +1660,161 @@ export class App {
     );
   }
 
+  // ---------------------------------------------------------------- leaderboard
+
+  private async showRanks() {
+    const kind = this.ranksKind;
+    this.render('ranks', `
+      <div class="screen fit"><div class="container">${this.header('ranks')}
+        <div class="card fill-card ranks-card">
+          <div class="ranks-head"><h2>🏆 Bảng xếp hạng</h2><p class="muted ranks-note" id="ranks-note"></p></div>
+          <div class="diff-seg ranks-tabs" role="radiogroup" aria-label="Xếp hạng theo">
+            ${LEADERBOARD_KINDS.map((k) => `<button type="button" role="radio" data-kind="${k}" aria-checked="${k === kind}" title="${LEADERBOARD_NAMES[k]}"><span aria-hidden="true">${RANK_ICONS[k]}</span><span>${RANK_TABS[k]}</span></button>`).join('')}
+          </div>
+          <div class="ranks-me" id="ranks-me"></div>
+          <div class="card-scroll ui-scroll ranks-list" id="ranks-list"></div>
+        </div>
+      </div></div>`);
+    this.bindNav();
+    this.ui.querySelector('.ranks-tabs')!.addEventListener('click', (e) => {
+      const k = (e.target as HTMLElement).closest<HTMLElement>('[data-kind]')?.dataset.kind;
+      if (!isLeaderboardKind(k) || k === this.ranksKind) return;
+      this.ranksKind = k;
+      this.ui.querySelectorAll<HTMLElement>('.ranks-tabs [data-kind]').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.kind === k)));
+      void this.loadRanks(k);
+    });
+    await this.loadRanks(kind);
+  }
+
+  private async loadRanks(kind: LeaderboardKind) {
+    const list = this.ui.querySelector<HTMLElement>('#ranks-list');
+    if (!list) return;
+    $('#ranks-note').textContent = RANK_NOTES[kind];
+    const cached = this.ranksCache.get(kind);
+    let board = cached && Date.now() - cached.at < RANKS_CACHE_MS ? cached.board : null;
+    if (!board) {
+      list.innerHTML = `<div class="ranks-wait">${walker('Đang tải bảng xếp hạng')}</div>`;
+      $('#ranks-me').innerHTML = '';
+      try {
+        board = await api.leaderboard(kind);
+        this.ranksCache.set(kind, { at: Date.now(), board });
+      } catch (err) {
+        if (this.screen === 'ranks' && this.ranksKind === kind) this.loadFailed('Không tải được bảng xếp hạng', err, () => void this.showRanks());
+        return;
+      }
+    }
+    // the player may have switched tab (or screen) while this board was loading
+    if (this.screen !== 'ranks' || this.ranksKind !== kind) return;
+    const meId = this.user?.id;
+    list.innerHTML = board.entries.length
+      ? board.entries.map((e) => rankRow(kind, e, e.id === meId)).join('')
+      : '<p class="muted center ranks-empty">Chưa có ai trên bảng này. Chơi vài trận để giành chỗ đầu tiên!</p>';
+    list.scrollTop = 0;
+    // a top-3 player already sees their own (highlighted) row at the head of the list
+    $('#ranks-me').innerHTML = !board.me
+      ? `<p class="muted ranks-me-hint">${esc(rankEntryHint(kind, board))}</p>`
+      : board.me.rank > 3 ? `<div class="ranks-me-label">Hạng của bạn</div>${rankRow(kind, board.me, true)}` : '';
+  }
+
+  // ---------------------------------------------------------------- admin: accounts
+
+  private showAdmin() {
+    if (!this.isAdmin) return this.showLobby();
+    this.render('admin', `
+      <div class="screen fit"><div class="container">${this.header('admin')}
+        <div class="card fill-card admin-card">
+          <div class="ranks-head"><h2>🛡️ Quản lý tài khoản</h2><p class="muted ranks-note" id="admin-note"></p></div>
+          <form class="admin-search" role="search">
+            <input class="input" name="q" maxlength="${NAME_MAX_LENGTH}" autocomplete="off" autocapitalize="off" spellcheck="false"
+              placeholder="🔍 Tìm theo tên người chơi" aria-label="Tìm theo tên người chơi" value="${esc(this.adminQuery)}" />
+          </form>
+          <div class="card-scroll ui-scroll admin-list" id="admin-list"></div>
+        </div>
+      </div></div>`);
+    this.bindNav();
+    const form = this.ui.querySelector<HTMLFormElement>('.admin-search')!;
+    const input = form.querySelector<HTMLInputElement>('input')!;
+    let timer = 0;
+    input.addEventListener('input', () => {
+      clearTimeout(timer);
+      timer = window.setTimeout(() => void this.loadAccounts(input.value.trim()), 300);
+    });
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      clearTimeout(timer);
+      void this.loadAccounts(input.value.trim());
+    });
+    this.ui.querySelector('#admin-list')!.addEventListener('click', (e) => {
+      const id = (e.target as HTMLElement).closest<HTMLElement>('[data-delete-account]')?.dataset.deleteAccount;
+      const account = id && this.adminAccounts.find((a) => a.id === id);
+      if (account) void this.deleteAccount(account);
+    });
+    void this.loadAccounts(this.adminQuery);
+  }
+
+  private async loadAccounts(q: string) {
+    this.adminQuery = q;
+    const seq = ++this.adminSeq;
+    const list = this.ui.querySelector<HTMLElement>('#admin-list');
+    const note = this.ui.querySelector<HTMLElement>('#admin-note');
+    if (!list || !note) return;
+    if (!/^[A-Za-z0-9_]*$/.test(q)) {
+      list.innerHTML = '<p class="muted center ranks-empty">Tên người chơi chỉ gồm chữ không dấu, số và dấu _.</p>';
+      note.textContent = '';
+      return;
+    }
+    if (!this.adminAccounts.length) list.innerHTML = `<div class="ranks-wait">${walker('Đang tải danh sách tài khoản')}</div>`;
+    try {
+      const { accounts, total } = await api.adminAccounts(q);
+      if (seq !== this.adminSeq || this.screen !== 'admin') return;
+      this.adminAccounts = accounts;
+      const shown = total > accounts.length ? ` · hiện ${accounts.length} tài khoản mới nhất` : '';
+      note.textContent = q ? `${total} tài khoản có tên chứa “${q}”${shown}` : `Tổng ${total} tài khoản${shown}`;
+      list.innerHTML = accounts.length
+        ? accounts.map((a) => this.accountRow(a)).join('')
+        : '<p class="muted center ranks-empty">Không tìm thấy tài khoản nào.</p>';
+    } catch (err) {
+      if (seq !== this.adminSeq || this.screen !== 'admin') return;
+      list.innerHTML = `<p class="muted center ranks-empty">${esc((err as Error).message)}</p>`;
+    }
+  }
+
+  private accountRow(a: AdminAccount): string {
+    const seen = a.presence === 'offline' ? (a.lastLoginAt ? `Đăng nhập ${formatDate(a.lastLoginAt)}` : 'Chưa đăng nhập') : PRESENCE_LABELS[a.presence];
+    const muted = a.mutedUntil ? ` · 🔇 đến ${formatDate(a.mutedUntil)}` : '';
+    const deletable = !a.admin && a.id !== this.user?.id;
+    return `<div class="ui-row admin-row">
+      <span class="ui-avatar">${esc(a.avatar)}</span>
+      <span class="ui-row-body">
+        <b class="ui-row-title">${nameHtml(a.username, a.admin)} <span class="admin-presence" title="${PRESENCE_LABELS[a.presence]}">${PRESENCE_ICONS[a.presence]}</span></b>
+        <small class="ui-row-sub">Cấp ${a.level} · ${a.matches} trận · Tạo ${formatDate(a.createdAt)}</small>
+        <small class="ui-row-sub">${esc(seen)}${muted}</small>
+      </span>
+      <span class="ui-row-actions">${deletable
+        ? `<button type="button" class="btn small danger" data-delete-account="${a.id}" aria-label="Xoá tài khoản ${esc(a.username)}">🗑️ Xoá</button>`
+        : ''}</span>
+    </div>`;
+  }
+
+  private async deleteAccount(a: AdminAccount) {
+    const ok = await confirmDialog({
+      title: `Xoá tài khoản ${a.username}?`,
+      message: `Tài khoản bị xoá vĩnh viễn cùng cấp độ (cấp ${a.level}), lịch sử ${a.matches} trận, bạn bè và mọi tin nhắn; không khôi phục được.${a.presence === 'offline' ? '' : ' Người này đang online sẽ bị đưa ra khỏi trận và đăng xuất ngay.'}`,
+      confirmText: 'Xoá vĩnh viễn',
+      cancelText: 'Giữ lại',
+      danger: true,
+      typeToConfirm: a.username,
+    });
+    if (!ok) return;
+    try {
+      const name = await this.social.deleteUser(a.id);
+      toast(`Đã xoá tài khoản ${name}.`);
+    } catch (err) {
+      toast((err as Error).message, 'error');
+    }
+    if (this.screen === 'admin') await this.loadAccounts(this.adminQuery);
+  }
+
   private showPanel(nav: PanelNav, title: string, body: string, bind?: (root: HTMLElement) => void) {
     this.panelNav = nav;
     this.render('panel', `
@@ -1549,6 +1829,30 @@ export class App {
    * The button editor page: a sketch of the match screen (so the player sees what a button would cover) with every
    * touch button on top to drag and resize. Saving or cancelling goes back to the page it was opened from.
    */
+  private async showRoomQr(name: string, code: string, link: string) {
+    if (this.closeQr || this.qrOpening) return;
+    this.qrOpening = true;
+    try {
+      const close = await showQrDialog({
+        title: 'Quét để vào phòng',
+        subtitle: name,
+        link,
+        code,
+        onCopy: () => void this.copyText(link, 'link mời'),
+        onClose: () => {
+          if (this.closeQr === close) this.closeQr = null;
+        },
+      });
+      // the room closed or a match started while the QR library was loading
+      if (this.screen !== 'room' || this.room?.id !== code) return close();
+      this.closeQr = close;
+    } catch (err) {
+      toast(`Không tạo được mã QR: ${(err as Error).message}`, 'error');
+    } finally {
+      this.qrOpening = false;
+    }
+  }
+
   private async showControls() {
     if (this.layoutEditor || this.session || this.screen === 'controls') return;
     const from = this.screen;
@@ -1571,7 +1875,7 @@ export class App {
     this.render('controls', `
       <div class="ctl-page" aria-hidden="true">
         <div class="ctl-zone left"><span>Vùng cần di chuyển</span></div>
-        <div class="ctl-zone right"><span>Vùng cần ngắm và bắn</span></div>
+        <div class="ctl-zone right"><span>Vùng cần xoay người</span></div>
         <div class="ctl-map"><span>Bản đồ nhỏ</span></div>
         <div class="ctl-me"></div>
         <div class="ctl-bottom"><div class="ctl-hp">100</div><div class="ctl-slots"><i></i><i></i><i></i><i></i></div></div>
